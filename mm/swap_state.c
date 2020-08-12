@@ -111,7 +111,8 @@ void show_swap_cache_info(void)
  * add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
  */
-int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp)
+int add_to_swap_cache(struct page *page, swp_entry_t entry,
+			gfp_t gfp, void **shadowp)
 {
 	struct address_space *address_space = swap_address_space(entry);
 	pgoff_t idx = swp_offset(entry);
@@ -131,7 +132,14 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp)
 		if (xas_error(&xas))
 			goto unlock;
 		for (i = 0; i < nr; i++) {
+			void *old;
+
 			VM_BUG_ON_PAGE(xas.xa_index != idx + i, page);
+			old = xas_load(&xas);
+			if (xa_is_value(old)) {
+				if (shadowp)
+					*shadowp = old;
+			}
 			set_page_private(page + i, entry.val + i);
 			xas_store(&xas, page + i);
 			xas_next(&xas);
@@ -155,7 +163,8 @@ unlock:
  * This must be called only on pages that have
  * been verified to be in the swap cache.
  */
-void __delete_from_swap_cache(struct page *page, swp_entry_t entry)
+void __delete_from_swap_cache(struct page *page,
+			swp_entry_t entry, void *shadow)
 {
 	struct address_space *address_space = swap_address_space(entry);
 	int i, nr = hpage_nr_pages(page);
@@ -165,9 +174,11 @@ void __delete_from_swap_cache(struct page *page, swp_entry_t entry)
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(PageWriteback(page), page);
+	VM_BUG_ON(shadow && !xa_is_value(shadow));
 
 	for (i = 0; i < nr; i++) {
-		void *entry = xas_store(&xas, NULL);
+		void *entry = xas_store(&xas, shadow);
+
 		VM_BUG_ON_PAGE(entry != page + i, entry);
 		set_page_private(page + i, 0);
 		xas_next(&xas);
@@ -209,7 +220,7 @@ int add_to_swap(struct page *page)
 	 * Add it to the swap cache.
 	 */
 	err = add_to_swap_cache(page, entry,
-			__GFP_HIGH|__GFP_NOMEMALLOC|__GFP_NOWARN);
+			__GFP_HIGH|__GFP_NOMEMALLOC|__GFP_NOWARN, NULL);
 	if (err)
 		/*
 		 * add_to_swap_cache() doesn't return -EEXIST, so we can safely
@@ -247,11 +258,39 @@ void delete_from_swap_cache(struct page *page)
 	struct address_space *address_space = swap_address_space(entry);
 
 	xa_lock_irq(&address_space->i_pages);
-	__delete_from_swap_cache(page, entry);
+	__delete_from_swap_cache(page, entry, NULL);
 	xa_unlock_irq(&address_space->i_pages);
 
 	put_swap_page(page, entry);
 	page_ref_sub(page, hpage_nr_pages(page));
+}
+
+void clear_shadow_from_swap_cache(int type, unsigned long begin,
+				unsigned long end)
+{
+	unsigned long curr = begin;
+
+	for (;;) {
+		void *old;
+		swp_entry_t entry = swp_entry(type, curr);
+		struct address_space *address_space = swap_address_space(entry);
+		XA_STATE(xas, &address_space->i_pages, curr);
+
+		xa_lock_irq(&address_space->i_pages);
+		xas_for_each(&xas, old, end) {
+			if (!xa_is_value(old))
+				continue;
+			xas_store(&xas, NULL);
+		}
+		xa_unlock_irq(&address_space->i_pages);
+
+		/* search the next swapcache until we meet end */
+		curr >>= SWAP_ADDRESS_SPACE_SHIFT;
+		curr++;
+		curr <<= SWAP_ADDRESS_SPACE_SHIFT;
+		if (curr > end)
+			break;
+	}
 }
 
 /* 
@@ -408,7 +447,8 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		/* May fail (-ENOMEM) if XArray node allocation failed. */
 		__SetPageLocked(new_page);
 		__SetPageSwapBacked(new_page);
-		err = add_to_swap_cache(new_page, entry, gfp_mask & GFP_KERNEL);
+		err = add_to_swap_cache(new_page, entry,
+					gfp_mask & GFP_KERNEL, NULL);
 		if (likely(!err)) {
 			/* Initiate read into locked page */
 			SetPageWorkingset(new_page);
