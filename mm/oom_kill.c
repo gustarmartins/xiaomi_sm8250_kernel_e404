@@ -1208,6 +1208,12 @@ SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
 	mm = p->mm;
 	mmgrab(mm);
 
+	/*
+	 * If we are too late and exit_mmap already checked mm_is_oom_victim,
+	 * this will block on mmap_sem until exit_mmap releases its write lock.
+	 */
+	set_bit(MMF_OOM_VICTIM, &mm->flags);
+
 	if (task_will_free_mem(p))
 		reap = true;
 	else {
