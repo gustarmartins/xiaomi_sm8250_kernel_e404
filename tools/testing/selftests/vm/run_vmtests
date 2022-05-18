@@ -182,6 +182,11 @@ echo "--------------------"
 echo "running mlock2-tests"
 echo "--------------------"
 ./mlock2-tests
+
+echo "---------------------"
+echo "running mrelease_test"
+echo "---------------------"
+./mrelease_test
 if [ $? -ne 0 ]; then
 	echo "[FAIL]"
 	exitcode=1
