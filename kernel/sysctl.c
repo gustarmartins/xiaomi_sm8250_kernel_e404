@@ -136,7 +136,8 @@ static int int_max = INT_MAX;
 static unsigned long zero_ul;
 static unsigned long one_ul = 1;
 static unsigned long long_max = LONG_MAX;
-static int one_hundred = 100;
+static int one_hundred = 200;
+static int __maybe_unused proactiveness_max = 100;
 static int one_thousand = 1000;
 #ifdef CONFIG_PRINTK
 static int ten_thousand = 10000;
@@ -1163,7 +1164,7 @@ static struct ctl_table kern_table[] = {
 		.procname	= "sg-big-buff",
 		.data		= &sg_big_buff,
 		.maxlen		= sizeof (int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 #endif
@@ -1331,14 +1332,14 @@ static struct ctl_table kern_table[] = {
 		.procname	= "ngroups_max",
 		.data		= &ngroups_max,
 		.maxlen		= sizeof (int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 	{
 		.procname	= "cap_last_cap",
 		.data		= (void *)&cap_last_cap,
 		.maxlen		= sizeof(int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 #if defined(CONFIG_LOCKUP_DETECTOR)
@@ -1468,14 +1469,14 @@ static struct ctl_table kern_table[] = {
 		.procname	= "bootloader_type",
 		.data		= &bootloader_type,
 		.maxlen		= sizeof (int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 	{
 		.procname	= "bootloader_version",
 		.data		= &bootloader_version,
 		.maxlen		= sizeof (int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 	{
@@ -1718,7 +1719,7 @@ static struct ctl_table kern_table[] = {
 		.procname	= "boot_reason",
 		.data		= &boot_reason,
 		.maxlen		= sizeof(int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 
@@ -1726,7 +1727,7 @@ static struct ctl_table kern_table[] = {
 		.procname	= "cold_boot",
 		.data		= &cold_boot,
 		.maxlen		= sizeof(int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
 #endif
@@ -1784,7 +1785,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "page-cluster",
 		.data		= &page_cluster,
 		.maxlen		= sizeof(int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 	},
@@ -1792,7 +1793,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_background_ratio",
 		.data		= &dirty_background_ratio,
 		.maxlen		= sizeof(dirty_background_ratio),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= dirty_background_ratio_handler,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
@@ -1801,7 +1802,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_background_bytes",
 		.data		= &dirty_background_bytes,
 		.maxlen		= sizeof(dirty_background_bytes),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= dirty_background_bytes_handler,
 		.extra1		= &one_ul,
 	},
@@ -1809,7 +1810,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_ratio",
 		.data		= &vm_dirty_ratio,
 		.maxlen		= sizeof(vm_dirty_ratio),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= dirty_ratio_handler,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
@@ -1818,7 +1819,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_bytes",
 		.data		= &vm_dirty_bytes,
 		.maxlen		= sizeof(vm_dirty_bytes),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= dirty_bytes_handler,
 		.extra1		= &dirty_bytes_min,
 	},
@@ -1833,7 +1834,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_expire_centisecs",
 		.data		= &dirty_expire_interval,
 		.maxlen		= sizeof(dirty_expire_interval),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 	},
@@ -1849,7 +1850,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "swappiness",
 		.data		= &vm_swappiness,
 		.maxlen		= sizeof(vm_swappiness),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
@@ -1929,6 +1930,15 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= sysctl_compaction_handler,
 	},
 	{
+		.procname	= "compaction_proactiveness",
+		.data		= &sysctl_compaction_proactiveness,
+		.maxlen		= sizeof(sysctl_compaction_proactiveness),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &proactiveness_max,
+	},
+	{
 		.procname	= "extfrag_threshold",
 		.data		= &sysctl_extfrag_threshold,
 		.maxlen		= sizeof(int),
@@ -1941,7 +1951,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "compact_unevictable_allowed",
 		.data		= &sysctl_compact_unevictable_allowed,
 		.maxlen		= sizeof(int),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
 		.extra2		= &one,
@@ -1968,7 +1978,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "watermark_scale_factor",
 		.data		= &watermark_scale_factor,
 		.maxlen		= sizeof(watermark_scale_factor),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= watermark_scale_factor_sysctl_handler,
 		.extra1		= &one,
 		.extra2		= &one_thousand,
@@ -2221,21 +2231,21 @@ static struct ctl_table fs_table[] = {
 		.procname	= "inode-nr",
 		.data		= &inodes_stat,
 		.maxlen		= 2*sizeof(long),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_nr_inodes,
 	},
 	{
 		.procname	= "inode-state",
 		.data		= &inodes_stat,
 		.maxlen		= 7*sizeof(long),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_nr_inodes,
 	},
 	{
 		.procname	= "file-nr",
 		.data		= &files_stat,
 		.maxlen		= sizeof(files_stat),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_nr_files,
 	},
 	{
@@ -2260,7 +2270,7 @@ static struct ctl_table fs_table[] = {
 		.procname	= "dentry-state",
 		.data		= &dentry_stat,
 		.maxlen		= 6*sizeof(long),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_nr_dentry,
 	},
 	{
@@ -2314,7 +2324,7 @@ static struct ctl_table fs_table[] = {
 		.procname	= "aio-nr",
 		.data		= &aio_nr,
 		.maxlen		= sizeof(aio_nr),
-		.mode		= 0444,
+		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
 	},
 	{
