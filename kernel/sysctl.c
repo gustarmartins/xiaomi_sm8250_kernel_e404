@@ -883,6 +883,13 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= sysctl_sched_uclamp_handler,
 	},
 #endif
+	{
+		.procname	= "sched_pelt_halflife",
+		.data		= &sysctl_sched_pelt_halflife,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sysctl_sched_pelt_halflife_handler,
+	},
 #ifdef CONFIG_SCHED_AUTOGROUP
 	{
 		.procname	= "sched_autogroup_enabled",

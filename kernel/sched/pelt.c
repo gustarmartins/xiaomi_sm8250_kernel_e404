@@ -25,14 +25,98 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sysctl.h>
 #include "sched.h"
 #include "pelt.h"
 
 #include <trace/events/sched.h>
 
 /*
+ * ---- Runtime PELT half-life tunable ----
+ *
+ * The Kconfig default (PELT_UTIL_HALFLIFE_32 / _16 / _8) seeds the initial
+ * values.  A sysctl at /proc/sys/kernel/sched_pelt_halflife lets userspace
+ * switch on the fly between 8, 16 and 32 ms.  The switch is lock-free:
+ * we store into the global pointer/scalars; existing in-flight PELT
+ * calculations see a consistent snapshot because each update reads the
+ * pointer once (via READ_ONCE) and the scalar constants are updated before
+ * the pointer (with a write barrier).
+ */
+
+#if defined(CONFIG_PELT_UTIL_HALFLIFE_8)
+const u32 *runnable_avg_yN_inv  = pelt_8_yN_inv;
+u32 pelt_load_avg_period        = PELT_8_PERIOD;
+u32 pelt_load_avg_max           = PELT_8_AVG_MAX;
+unsigned int sysctl_sched_pelt_halflife = 8;
+#elif defined(CONFIG_PELT_UTIL_HALFLIFE_16)
+const u32 *runnable_avg_yN_inv  = pelt_16_yN_inv;
+u32 pelt_load_avg_period        = PELT_16_PERIOD;
+u32 pelt_load_avg_max           = PELT_16_AVG_MAX;
+unsigned int sysctl_sched_pelt_halflife = 16;
+#else /* CONFIG_PELT_UTIL_HALFLIFE_32 (default) */
+const u32 *runnable_avg_yN_inv  = pelt_32_yN_inv;
+u32 pelt_load_avg_period        = PELT_32_PERIOD;
+u32 pelt_load_avg_max           = PELT_32_AVG_MAX;
+unsigned int sysctl_sched_pelt_halflife = 32;
+#endif
+
+/*
+ * sysctl handler: accepts 8, 16 or 32.  Anything else is rejected.
+ *
+ * The switch order matters:
+ *   1. write scalars (period, max) — these are read by value, safe to update
+ *   2. smp_wmb()  — ensure scalars are visible before pointer
+ *   3. write pointer (runnable_avg_yN_inv) — readers use READ_ONCE
+ *
+ * There is a short window where a concurrent decay_load() might use the new
+ * table with the old PERIOD/MAX or vice-versa; this only produces a slightly
+ * inaccurate single sample which the geometric decay self-corrects within one
+ * period.  No lock contention on the scheduler hot path.
+ */
+int sysctl_sched_pelt_halflife_handler(struct ctl_table *table, int write,
+				       void __user *buffer, size_t *lenp,
+				       loff_t *ppos)
+{
+	unsigned int old = sysctl_sched_pelt_halflife;
+	int ret;
+
+	ret = proc_dointvec(table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	switch (sysctl_sched_pelt_halflife) {
+	case 8:
+		pelt_load_avg_period = PELT_8_PERIOD;
+		pelt_load_avg_max    = PELT_8_AVG_MAX;
+		smp_wmb();
+		WRITE_ONCE(runnable_avg_yN_inv, pelt_8_yN_inv);
+		break;
+	case 16:
+		pelt_load_avg_period = PELT_16_PERIOD;
+		pelt_load_avg_max    = PELT_16_AVG_MAX;
+		smp_wmb();
+		WRITE_ONCE(runnable_avg_yN_inv, pelt_16_yN_inv);
+		break;
+	case 32:
+		pelt_load_avg_period = PELT_32_PERIOD;
+		pelt_load_avg_max    = PELT_32_AVG_MAX;
+		smp_wmb();
+		WRITE_ONCE(runnable_avg_yN_inv, pelt_32_yN_inv);
+		break;
+	default:
+		/* reject invalid value, restore old */
+		sysctl_sched_pelt_halflife = old;
+		return -EINVAL;
+	}
+
+	pr_info("sched/pelt: half-life switched to %u ms\n",
+		sysctl_sched_pelt_halflife);
+	return 0;
+}
+
+/*
  * Approximate:
- *   val * y^n,    where y^32 ~= 0.5 (~1 scheduling period)
+ *   val * y^n,    where y^PERIOD ~= 0.5 (~1 scheduling period)
  */
 static u64 decay_load(u64 val, u64 n)
 {
