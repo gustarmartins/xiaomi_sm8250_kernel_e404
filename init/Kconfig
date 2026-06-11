@@ -846,14 +846,15 @@ endmenu
 menu "FAIR Scheuler tunables"
 
 choice
-	prompt "Utilization's PELT half-Life"
+	prompt "Utilization's PELT half-Life (boot default)"
 	default PELT_UTIL_HALFLIFE_32
 	help
-	  Allows choosing one of the possible values for the PELT half-life to
-	  be used for the update of the utilization of tasks and CPUs.
-	  The half-life is the amount of [ms] required by the PELT signal to
-	  build up to 50% utilization. The higher the half-life the longer it
-	  takes for a task to be represented as a big one.
+	  Selects the BOOT-TIME default for the PELT half-life used to update
+	  the utilization of tasks and CPUs.  The half-life is the amount of
+	  [ms] required by the PELT signal to build up to 50% utilization.
+
+	  This can be changed at runtime via:
+	    /proc/sys/kernel/sched_pelt_halflife  (accepts 8, 16 or 32)
 
 	  If not sure, use the default of 32 ms.
 
