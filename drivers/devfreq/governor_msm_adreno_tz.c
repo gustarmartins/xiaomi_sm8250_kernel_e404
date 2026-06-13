@@ -50,6 +50,9 @@ static DEFINE_SPINLOCK(tz_lock);
 
 #define TAG "msm_adreno_tz: "
 
+/* Bias the busy time reported to TZ DCVS upward (0 = off, max 3). */
+static unsigned int adrenoboost = 1;
+
 static atomic_long_t suspend_time;
 static atomic_long_t suspend_start;
 static atomic_long_t acc_total, acc_relative_busy;
@@ -123,13 +126,34 @@ static ssize_t suspend_time_show(struct device *dev,
 	return snprintf(buf, PAGE_SIZE, "%llu\n", time_diff);
 }
 
+static ssize_t adrenoboost_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n", adrenoboost);
+}
+
+static ssize_t adrenoboost_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int val;
+
+	if (kstrtouint(buf, 0, &val))
+		return -EINVAL;
+
+	adrenoboost = min(val, 3u);
+	return count;
+}
+
 static DEVICE_ATTR_RO(gpu_load);
 
 static DEVICE_ATTR_RO(suspend_time);
 
+static DEVICE_ATTR_RW(adrenoboost);
+
 static const struct device_attribute *adreno_tz_attr_list[] = {
 		&dev_attr_gpu_load,
 		&dev_attr_suspend_time,
+		&dev_attr_adrenoboost,
 		NULL
 };
 
@@ -416,6 +440,8 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		} else {
 			scm_data[2] = priv->bin.busy_time;
 		}
+		if (adrenoboost)
+			scm_data[2] += scm_data[2] >> (3 - adrenoboost);
 		scm_data[3] = context_count;
 		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
 					&val, sizeof(val), priv);
