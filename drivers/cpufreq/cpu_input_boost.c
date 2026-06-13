@@ -220,6 +220,87 @@ static int msm_drm_notifier_cb(struct notifier_block *nb, unsigned long action,
 	return NOTIFY_OK;
 }
 
+static void cpu_input_boost_input_event(struct input_handle *handle,
+					unsigned int type, unsigned int code,
+					int value)
+{
+	__cpu_input_boost_kick_max(&boost_drv_g,
+				   CONFIG_INPUT_BOOST_DURATION_MS);
+}
+
+static int cpu_input_boost_input_connect(struct input_handler *handler,
+					 struct input_dev *dev,
+					 const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int ret;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "cpu_input_boost_handle";
+
+	ret = input_register_handle(handle);
+	if (ret)
+		goto free_handle;
+
+	ret = input_open_device(handle);
+	if (ret)
+		goto unregister_handle;
+
+	return 0;
+
+unregister_handle:
+	input_unregister_handle(handle);
+free_handle:
+	kfree(handle);
+	return ret;
+}
+
+static void cpu_input_boost_input_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+static const struct input_device_id cpu_input_boost_ids[] = {
+	/* Multi-touch touchscreen */
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
+			INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.evbit = { BIT_MASK(EV_ABS) },
+		.absbit = { [BIT_WORD(ABS_MT_POSITION_X)] =
+			BIT_MASK(ABS_MT_POSITION_X) |
+			BIT_MASK(ABS_MT_POSITION_Y) }
+	},
+	/* Touchpad */
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_KEYBIT |
+			INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.keybit = { [BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH) },
+		.absbit = { [BIT_WORD(ABS_X)] =
+			BIT_MASK(ABS_X) | BIT_MASK(ABS_Y) }
+	},
+	/* Keypad */
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT,
+		.evbit = { BIT_MASK(EV_KEY) }
+	},
+	{ }
+};
+
+static struct input_handler cpu_input_boost_input_handler = {
+	.event		= cpu_input_boost_input_event,
+	.connect	= cpu_input_boost_input_connect,
+	.disconnect	= cpu_input_boost_input_disconnect,
+	.name		= "cpu_input_boost_handler",
+	.id_table	= cpu_input_boost_ids
+};
+
 static int __init cpu_input_boost_init(void)
 {
 	struct boost_drv *b = &boost_drv_g;
@@ -248,8 +329,16 @@ static int __init cpu_input_boost_init(void)
 		goto unregister_fb_notif;
 	}
 
+	ret = input_register_handler(&cpu_input_boost_input_handler);
+	if (ret) {
+		pr_err("Failed to register input handler, err: %d\n", ret);
+		goto stop_thread;
+	}
+
 	return 0;
 
+stop_thread:
+	kthread_stop(thread);
 unregister_fb_notif:
 	mi_drm_unregister_client(&b->msm_drm_notif);
 unregister_cpu_notif:
