@@ -3934,7 +3934,14 @@ static bool age_lruvec(struct lruvec *lruvec, struct scan_control *sc,
 }
 
 /* to protect the working set of the last N jiffies */
-static unsigned long lru_gen_min_ttl __read_mostly = 5 * HZ; // 5000ms
+/*
+ * Default 0 (disabled): a non-zero min_ttl makes MGLRU invoke the kernel OOM
+ * killer whenever the whole working set is younger than min_ttl, which during
+ * an app-launch burst is always true -> OOM-kill storm despite free zram swap,
+ * and that storm exposed the lru_gen_look_around() NULL-deref panic (2026-06).
+ * Let lmkd (PSI) handle pressure; keep the kernel backstop off.
+ */
+static unsigned long lru_gen_min_ttl __read_mostly;
 static int lru_gen_min_ttl_unsatisfied;
 
 static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
@@ -4014,15 +4021,28 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	unsigned long bitmap[BITS_TO_LONGS(MIN_LRU_BATCH)] = {};
 	struct mem_cgroup *memcg = page_memcg(pvmw->page);
 	struct pglist_data *pgdat = page_pgdat(pvmw->page);
-	struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
-	DEFINE_MAX_SEQ(lruvec);
-	int old_gen, new_gen = lru_gen_from_seq(max_seq);
+	struct lruvec *lruvec;
+	unsigned long max_seq;
+	int old_gen, new_gen;
 
 	lockdep_assert_held(pvmw->ptl);
 	VM_BUG_ON_PAGE(PageLRU(pvmw->page), pvmw->page);
 
 	if (spin_is_contended(pvmw->ptl))
 		return;
+
+	/*
+	 * The page can race with memcg teardown/uncharge during OOM reaping,
+	 * leaving page_memcg() NULL; mem_cgroup_lruvec() does not guard a NULL
+	 * memcg and would dereference NULL+nodeinfo (look_around+0x44 panic,
+	 * 2026-06). Bail out instead of faulting.
+	 */
+	if (!mem_cgroup_disabled() && !memcg)
+		return;
+
+	lruvec = mem_cgroup_lruvec(pgdat, memcg);
+	max_seq = READ_ONCE(lruvec->lrugen.max_seq);
+	new_gen = lru_gen_from_seq(max_seq);
 
 	start = max(pvmw->address & PMD_MASK, pvmw->vma->vm_start);
 	end = min(pvmw->address | ~PMD_MASK, pvmw->vma->vm_end - 1) + 1;
