@@ -686,7 +686,7 @@ static void usbpd_pm_update_cp_sec_status(struct usbpd_pm *pdpm)
 		pdpm->cp_sec.ibus_curr = val.intval;
 
 	ret = power_supply_get_property(pdpm->cp_sec_psy,
-					POWER_SUPPLY_PROP_CHARGE_ENABLED, &val);
+					POWER_SUPPLY_PROP_CHARGING_ENABLED, &val);
 	if (!ret)
 		pdpm->cp_sec.charge_enabled = val.intval;
 }

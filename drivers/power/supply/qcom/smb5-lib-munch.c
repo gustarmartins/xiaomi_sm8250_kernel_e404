@@ -2444,6 +2444,8 @@ int smblib_get_prop_batt_present(struct smb_charger *chg,
 	return rc;
 }
 
+#define E404_INPUT_PRESENT_CUTOFF_UV	(CUTOFF_VOL_THR - 200000)
+
 static bool smblib_check_vbat_before_shutdown(struct smb_charger *chg)
 {
 	int rc;
@@ -2493,15 +2495,22 @@ static void smblib_check_input_status(struct smb_charger *chg)
 	vbat_uv = pval.intval;
 	pr_err("vbat_uv: %d\n", vbat_uv);
 
+	if (chg->report_input_absent
+			&& vbat_uv > (CUTOFF_VOL_THR + CUTOFF_VOL_HYS)) {
+		chg->report_input_absent = false;
+		power_supply_changed(chg->batt_psy);
+	}
+
 	/*
-	 * if battery soc is 0%, vbat is below 3400mV and input is present in
-	 * normal mode (not power-off charging mode), set usb/usb_port/dc
-	 * online to false to notify system to power off.
+	 * If SOC is 0% and VBAT is truly critical while external power is
+	 * present in normal mode, report input absent so userspace powers off.
+	 * Do not use the normal 3400mV cutoff here: worn packs can dip during
+	 * USB/PD negotiation and Android shuts down even though input arrived.
 	 */
 	if ((input_present & INPUT_PRESENT_DC
-			|| input_present & INPUT_PRESENT_USB)
-				&& !off_charge_flag
-				&& (vbat_uv <= CUTOFF_VOL_THR)) {
+				|| input_present & INPUT_PRESENT_USB)
+					&& !off_charge_flag
+					&& (vbat_uv <= E404_INPUT_PRESENT_CUTOFF_UV)) {
 		chg->report_input_absent = true;
 		power_supply_changed(chg->batt_psy);
 	}
@@ -7139,7 +7148,23 @@ int smblib_set_prop_pd_active(struct smb_charger *chg,
 		vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_100MA);
 		vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
 		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, false, 0);
-		/*set the fcc to PD_UNVERIFED_CURRENT when pd is not verifed*/
+		/*
+		 * E404: Auto-verify PD when PPS is negotiated.
+		 * Stock HyperOS has a proprietary userspace daemon that
+		 * verifies Xiaomi chargers and writes pd_authentication=1.
+		 * Without it (custom ROM), pd_verifed stays false and FCC
+		 * is capped at 4800 mA, fastcharge mode never activates,
+		 * and charge pump power is severely limited.
+		 * Fix: treat any successful PPS negotiation as verified.
+		 */
+		if (chg->pd_active == POWER_SUPPLY_PD_PPS_ACTIVE
+						&& !chg->pd_verifed) {
+			chg->pd_verifed = true;
+			smblib_set_fastcharge_mode(chg, true);
+			if (chg->usb_psy)
+				power_supply_changed(chg->usb_psy);
+			pr_err("E404: PD PPS active - auto-verified, fastcharge enabled\n");
+		}
 		if (!chg->pd_verifed) {
 			rc = vote(chg->fcc_votable, PD_VERIFED_VOTER,
 					true, PD_UNVERIFED_CURRENT);
@@ -8936,6 +8961,7 @@ struct quick_charge adapter_cap[11] = {
 };
 
 #define ADAPTER_PWR_NONE              0x0
+#define WIRE_SUPER_POWER_MAX          50
 #define ADAPTER_XIAOMI_QC3_PWR_20W    0x9
 #define ADAPTER_XIAOMI_PD_PWR_20W     0xa
 #define ADAPTER_XIAOMI_CAR_PWR_20W    0xb
@@ -8946,7 +8972,7 @@ struct quick_charge adapter_cap[11] = {
 int smblib_get_quick_charge_type(struct smb_charger *chg)
 {
 	int i = 0, rc;
-	int tx_adapter = 0, wls_online = 0;
+	int tx_adapter = 0, wls_online = 0, power_max = 0;
 	union power_supply_propval pval = {0, };
 
 	if (!chg) {
@@ -8964,6 +8990,9 @@ int smblib_get_quick_charge_type(struct smb_charger *chg)
 	}
 
 	if ((chg->real_charger_type == POWER_SUPPLY_TYPE_USB_PD) && chg->pd_verifed) {
+		power_max = smblib_get_adapter_power_max(chg);
+		if (power_max >= WIRE_SUPER_POWER_MAX)
+			return QUICK_CHARGE_SUPER;
 		return QUICK_CHARGE_TURBE;
 	}
 
