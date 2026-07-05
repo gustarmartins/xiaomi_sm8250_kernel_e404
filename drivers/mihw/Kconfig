@@ -1,0 +1,18 @@
+menu "Xiaomi Hardware Feature"
+
+config MIHW
+	bool "Mi hardware feature code"
+	default n
+	help
+	  Container for Xiaomi hardware/framework support drivers (millet).
+
+config MILLET
+	bool "frozen framework"
+	depends on MIHW
+	---help---
+	  Kernel side of MIUI/HyperOS greezer (smart frozen): netlink 29
+	  channel plus binder/signal/pkg monitors. Passive unless the
+	  framework arms persist.sys.powmillet.enable; the AOSP cgroup
+	  freezer keeps working regardless, so one kernel serves both lanes.
+
+endmenu

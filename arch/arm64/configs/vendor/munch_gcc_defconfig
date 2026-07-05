@@ -22,6 +22,12 @@ CONFIG_E404_OPLUS=y
 # CONFIG_E404_ALIOTH_5K_BATT_DEFAULT is not set
 
 #
+# Xiaomi Hardware Feature
+#
+CONFIG_MIHW=y
+CONFIG_MILLET=y
+
+#
 # General setup
 #
 CONFIG_INIT_ENV_ARG_LIMIT=32
