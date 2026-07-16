@@ -1133,7 +1133,7 @@ unsigned long zs_get_total_pages(struct zs_pool *pool)
 EXPORT_SYMBOL_GPL(zs_get_total_pages);
 
 void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
-			void *local_copy)
+			size_t mem_len, void *local_copy)
 {
 	struct zspage *zspage;
 	struct page *page;
@@ -1156,7 +1156,10 @@ void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
 	class = zspage_class(pool, zspage);
 	off = offset_in_page(class->size * obj_idx);
 
-	if (off + class->size <= PAGE_SIZE) {
+	if (!ZsHugePage(zspage))
+		off += ZS_HANDLE_SIZE;
+
+	if (off + mem_len <= PAGE_SIZE) {
 		/* this object is contained entirely within a page */
 		addr = kmap_atomic(page);
 		addr += off;
@@ -1165,7 +1168,7 @@ void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
 
 		/* this object spans two pages */
 		sizes[0] = PAGE_SIZE - off;
-		sizes[1] = class->size - sizes[0];
+		sizes[1] = mem_len - sizes[0];
 		addr = local_copy;
 
 		memcpy_from_page(addr, page,
@@ -1175,15 +1178,12 @@ void *zs_obj_read_begin(struct zs_pool *pool, unsigned long handle,
 				 0, sizes[1]);
 	}
 
-	if (!ZsHugePage(zspage))
-		addr += ZS_HANDLE_SIZE;
-
 	return addr;
 }
 EXPORT_SYMBOL_GPL(zs_obj_read_begin);
 
 void zs_obj_read_end(struct zs_pool *pool, unsigned long handle,
-		     void *handle_mem)
+		     size_t mem_len, void *handle_mem)
 {
 	struct zspage *zspage;
 	struct page *page;
@@ -1197,9 +1197,10 @@ void zs_obj_read_end(struct zs_pool *pool, unsigned long handle,
 	class = zspage_class(pool, zspage);
 	off = offset_in_page(class->size * obj_idx);
 
-	if (off + class->size <= PAGE_SIZE) {
-		if (!ZsHugePage(zspage))
-			off += ZS_HANDLE_SIZE;
+	if (!ZsHugePage(zspage))
+		off += ZS_HANDLE_SIZE;
+
+	if (off + mem_len <= PAGE_SIZE) {
 		handle_mem -= off;
 		kunmap_atomic(handle_mem);
 	}
@@ -1782,7 +1783,19 @@ static int zs_page_migrate(struct address_space *mapping, struct page *newpage,
 	if (!zspage_write_trylock(zspage)) {
 		spin_unlock(&class->lock);
 		write_unlock(&pool->lock);
-		return -EINVAL;
+		/*
+		 * Return -EBUSY but not -EAGAIN: the zspage's reader-lock
+		 * owner may hold the lock for an unbounded duration due to a
+		 * slow decompression or reader-lock owner preemption.
+		 * Since migration retries are bounded by
+		 * NR_MAX_MIGRATE_PAGES_RETRY and performed with virtually no
+		 * delay between attempts, there is no guarantee the lock will
+		 * be released in time for a retry to succeed.
+		 * -EAGAIN implies "try again soon", which does not hold here.
+		 * -EBUSY more accurately conveys "resource is occupied,
+		 * migration cannot proceed".
+		 */
+		return -EBUSY;
 	}
 
 	offset = get_first_obj_offset(page);
