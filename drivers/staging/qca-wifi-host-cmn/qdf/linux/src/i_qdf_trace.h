@@ -340,7 +340,7 @@ static inline void qdf_vprint(const char *fmt, va_list args)
 #endif
 
 #ifdef PANIC_ON_BUG
-#ifdef CONFIG_SLUB_DEBUG
+#if defined(CONFIG_SLUB_DEBUG) && defined(WLAN_DEBUG)
 /**
  * __qdf_bug() - Calls BUG() when the PANIC_ON_BUG compilation option is enabled
  *
@@ -367,18 +367,18 @@ static inline void qdf_vprint(const char *fmt, va_list args)
  *
  * A simple workaround for this, is to put the definition of __qdf_bug in
  * another compilation unit, which prevents the compiler from assuming
- * subsequent code is unreachable. For CONFIG_SLUB_DEBUG, do this to catch more
- * bugs. Otherwise, use the typical inlined approach.
+ * subsequent code is unreachable. Use that definition when CONFIG_SLUB_DEBUG
+ * and WLAN_DEBUG are both enabled. Otherwise, use the inlined approach.
  *
  * Return: None
  */
 void __qdf_bug(void);
-#else /* CONFIG_SLUB_DEBUG */
+#else /* CONFIG_SLUB_DEBUG && WLAN_DEBUG */
 static inline void __qdf_bug(void)
 {
 	BUG();
 }
-#endif /* CONFIG_SLUB_DEBUG */
+#endif /* CONFIG_SLUB_DEBUG && WLAN_DEBUG */
 
 /**
  * QDF_DEBUG_PANIC() - In debug builds, panic, otherwise do nothing
