@@ -140,5 +140,6 @@ kernel/configs/android-*.cfg
 # Tech package directories
 #techpack/
 out/
+/out-*/
 build.sh
 dtbo_build.sh
