@@ -384,7 +384,6 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 	int res;
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
 	struct filename *kname;
-	kname = getname(filename);
 
 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
 		return -EINVAL;
@@ -428,15 +427,17 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
 	old_cred = override_creds(override_cred);
 
 	if (unlikely(is_app_uid())) {
+		kname = getname(filename);
 		if (!IS_ERR(kname)) {
-			if (should_hide_addond(kname->name)) {
-				putname(kname);
+			bool hide_addond = should_hide_addond(kname->name);
+
+			putname(kname);
+			if (hide_addond) {
 				res = -ENOENT;
 				goto out;
 			}
-		putname(kname);
 		}
-}
+	}
 retry:
 	res = user_path_at(dfd, filename, lookup_flags, &path);
 	if (res)
