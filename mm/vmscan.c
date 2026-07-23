@@ -2214,6 +2214,56 @@ static void shrink_active_list(unsigned long nr_to_scan,
 			nr_deactivate, nr_rotated, sc->priority, file);
 }
 
+#ifdef CONFIG_DEBUG_VM
+/*
+ * Validate a privately isolated page list (madvise_pageout/madvise_cold
+ * path) before shrink_page_list() walks it. A page here must be off the
+ * LRU with a live refcount and intact linkage; anything else means a
+ * second path touched the page while it was isolated — the corruption
+ * behind the 2026-07-22 shrink_page_list+0x468 LIST_POISON dereference.
+ * The poison values and torn linkage are checked without dereferencing
+ * unvalidated pointers so detection cannot itself fault.
+ */
+static bool reclaim_pages_list_valid(struct list_head *page_list)
+{
+	struct list_head *pos = page_list->next;
+	int n = 0;
+
+	while (pos != page_list) {
+		struct list_head *nxt, *prv;
+		struct page *page;
+
+		if (!virt_addr_valid(pos)) {
+			pr_err("mm_diag: pageout list entry %d invalid (%px)\n",
+			       n, pos);
+			return false;
+		}
+		nxt = pos->next;
+		prv = pos->prev;
+		if (!virt_addr_valid(nxt) || !virt_addr_valid(prv) ||
+		    nxt->prev != pos || prv->next != pos) {
+			pr_err("mm_diag: pageout list linkage corrupt at entry %d (%px <- %px -> %px)\n",
+			       n, prv, pos, nxt);
+			return false;
+		}
+		page = list_entry(pos, struct page, lru);
+		if (PageLRU(page) || page_count(page) == 0) {
+			pr_err("mm_diag: bad page state on pageout list entry %d\n",
+			       n);
+			dump_page(page, "mm_diag pageout list");
+			return false;
+		}
+		if (++n > 1024) {
+			pr_err("mm_diag: pageout list unexpectedly long/cyclic (>%d)\n",
+			       n);
+			return false;
+		}
+		pos = nxt;
+	}
+	return true;
+}
+#endif
+
 unsigned long reclaim_pages(struct list_head *page_list)
 {
 	int nid = -1;
@@ -2229,6 +2279,17 @@ unsigned long reclaim_pages(struct list_head *page_list)
 		.may_unmap = 1,
 		.may_swap = 1,
 	};
+
+#ifdef CONFIG_DEBUG_VM
+	/*
+	 * Abandoning the batch leaks its isolated pages (bounded by one
+	 * pmd walk); that is recoverable, walking a corrupt list is not.
+	 */
+	if (!reclaim_pages_list_valid(page_list)) {
+		WARN_ONCE(1, "mm_diag: abandoning corrupt pageout batch");
+		return 0;
+	}
+#endif
 
 	noreclaim_flag = memalloc_noreclaim_save();
 
