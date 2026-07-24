@@ -14,6 +14,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/trace_seq.h>
 #include <linux/trace_events.h>
+#include <linux/coresight-stm.h>
 #include <linux/compiler.h>
 #include <linux/trace_seq.h>
 #include <linux/glob.h>

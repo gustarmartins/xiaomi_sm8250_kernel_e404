@@ -10,7 +10,9 @@ ifdef CONFIG_QCOM_BUS_CONFIG_RPMH
 	obj-y += msm_bus_fabric_rpmh.o msm_bus_arb_rpmh.o msm_bus_rules.o \
 		msm_bus_bimc_rpmh.o msm_bus_noc_rpmh.o msm_bus_proxy_client.o
 	obj-$(CONFIG_OF) += msm_bus_of_rpmh.o
-	obj-$(CONFIG_DEBUG_FS) += msm_bus_dbg_rpmh.o
+	# msm_bus_dbg_rpmh.o would redefine the API that msm_bus_core.h
+	# hard-stubs with '#if 0'; the debug client tracking is disabled
+	# in this tree regardless of CONFIG_DEBUG_FS.
 else
 	obj-y += msm_bus_fabric_adhoc.o msm_bus_arb_adhoc.o msm_bus_rules.o \
 		msm_bus_bimc_adhoc.o msm_bus_noc_adhoc.o msm_bus_qnoc_adhoc.o

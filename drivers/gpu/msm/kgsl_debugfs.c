@@ -30,6 +30,8 @@ static int _strict_get(void *data, u64 *val)
 
 DEFINE_DEBUGFS_ATTRIBUTE(_strict_fops, _strict_get, _strict_set, "%llu\n");
 
+#if 0 /* break_isdb debugfs: struct kgsl_device lost its set_isdb_breakpoint
+       * member in this tree; never compiled with CONFIG_DEBUG_FS=y. */
 static void kgsl_qdss_gfx_register_probe(struct kgsl_device *device)
 {
 	struct resource *res;
@@ -67,6 +69,7 @@ static int _isdb_get(void *data, u64 *val)
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(_isdb_fops, _isdb_get, _isdb_set, "%llu\n");
+#endif /* break_isdb debugfs */
 
 void kgsl_device_debugfs_init(struct kgsl_device *device)
 {
@@ -78,8 +81,7 @@ void kgsl_device_debugfs_init(struct kgsl_device *device)
 	device->d_debugfs = debugfs_create_dir(device->name,
 						       kgsl_debugfs_dir);
 	snapshot_dir = debugfs_create_dir("snapshot", kgsl_debugfs_dir);
-	debugfs_create_file("break_isdb", 0644, snapshot_dir, device,
-		&_isdb_fops);
+	(void)snapshot_dir; /* break_isdb compiled out, see above */
 }
 
 void kgsl_device_debugfs_close(struct kgsl_device *device)

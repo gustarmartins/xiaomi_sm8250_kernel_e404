@@ -746,7 +746,12 @@ static void ufshcd_print_cmd_log(struct ufs_hba *hba)
 }
 #endif
 
-#ifdef CONFIG_TRACEPOINTS
+/*
+ * This helper only feeds __ufshcd_cmd_log(), which exists solely under
+ * CONFIG_SCSI_UFSHCD_CMD_LOGGING; TRACEPOINTS without CMD_LOGGING (any
+ * FTRACE-enabled build) previously failed to build here.
+ */
+#if defined(CONFIG_TRACEPOINTS) && defined(CONFIG_SCSI_UFSHCD_CMD_LOGGING)
 static inline void ufshcd_cond_add_cmd_trace(struct ufs_hba *hba,
 					unsigned int tag, const char *str)
 {

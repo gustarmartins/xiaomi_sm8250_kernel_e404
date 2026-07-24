@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0
 netfilter-objs := core.o nf_queue.o nf_sockopt.o utils.o
+# nf_log removal ("net: remove debugging and logging code functionality")
+# stubbed the API in headers only for !CONFIG_DEBUG_KERNEL; debug builds
+# declare the real functions again and must link the real object.
+ifdef CONFIG_DEBUG_KERNEL
+netfilter-objs += nf_log.o
+endif
 
 nf_conntrack-y	:= nf_conntrack_core.o nf_conntrack_standalone.o nf_conntrack_expect.o nf_conntrack_helper.o \
 		   nf_conntrack_proto.o nf_conntrack_proto_generic.o nf_conntrack_proto_tcp.o nf_conntrack_proto_udp.o \

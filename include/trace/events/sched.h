@@ -82,7 +82,7 @@ TRACE_EVENT(sched_enq_deq_task,
 		__entry->cpu		= task_cpu(p);
 		__entry->enqueue	= enqueue;
 		__entry->nr_running	= task_rq(p)->nr_running;
-		__entry->cpu_load	= task_rq(p)->cpu_load[0];
+		__entry->cpu_load	= 0; /* rq->cpu_load[] removed in this tree */
 		__entry->rt_nr_running	= task_rq(p)->rt.rt_nr_running;
 		__entry->cpus_allowed	= cpus_allowed;
 		__entry->demand		= task_load(p);
@@ -725,7 +725,7 @@ TRACE_EVENT(sched_load_cfs_rq,
 		__trace_sched_path(cfs_rq, __get_dynamic_array(path),
 				   __get_dynamic_array_len(path));
 		__entry->load		= cfs_rq->avg.load_avg;
-		__entry->rbl_load 	= cfs_rq->avg.runnable_load_avg;
+		__entry->rbl_load 	= 0; /* runnable_load_avg removed */
 		__entry->util		= cfs_rq->avg.util_avg;
 	),
 
@@ -831,7 +831,7 @@ TRACE_EVENT(sched_load_se,
 				      p ? TASK_COMM_LEN : sizeof("(null)"));
 		__entry->pid = p ? p->pid : -1;
 		__entry->load = se->avg.load_avg;
-		__entry->rbl_load = se->avg.runnable_load_avg;
+		__entry->rbl_load = 0; /* runnable_load_avg removed */
 		__entry->util = se->avg.util_avg;
 	),
 
@@ -893,8 +893,9 @@ TRACE_EVENT(sched_util_est_task,
 		__entry->pid			= tsk->pid;
 		__entry->cpu			= task_cpu(tsk);
 		__entry->util_avg		= avg->util_avg;
-		__entry->est_enqueued		= avg->util_est.enqueued;
-		__entry->est_ewma		= avg->util_est.ewma;
+		/* util_est is a plain unsigned int in this tree (no ewma) */
+		__entry->est_enqueued		= avg->util_est;
+		__entry->est_ewma		= 0;
 	),
 
 	TP_printk("comm=%s pid=%d cpu=%d util_avg=%u util_est_ewma=%u util_est_enqueued=%u",
@@ -924,7 +925,7 @@ TRACE_EVENT(sched_util_est_cpu,
 	TP_fast_assign(
 		__entry->cpu			= cpu;
 		__entry->util_avg		= cfs_rq->avg.util_avg;
-		__entry->util_est_enqueued	= cfs_rq->avg.util_est.enqueued;
+		__entry->util_est_enqueued	= cfs_rq->avg.util_est;
 	),
 
 	TP_printk("cpu=%d util_avg=%u util_est_enqueued=%u",
@@ -964,10 +965,10 @@ TRACE_EVENT(sched_cpu_util,
 		__entry->capacity_curr      = capacity_curr_of(cpu);
 		__entry->capacity           = capacity_of(cpu);
 		__entry->capacity_orig      = capacity_orig_of(cpu);
-		__entry->idle_state         = idle_get_state_idx(cpu_rq(cpu));
+		__entry->idle_state         = -1; /* idle_get_state_idx removed */
 		__entry->irqload            = sched_irqload(cpu);
 		__entry->online             = cpu_online(cpu);
-		__entry->isolated           = cpu_isolated(cpu);
+		__entry->isolated           = 0; /* cpu_isolated removed */
 		__entry->reserved           = is_reserved(cpu);
 		__entry->high_irq_load      = sched_cpu_high_irqload(cpu);
 		__entry->nr_rtg_high_prio_tasks = walt_nr_rtg_high_prio(cpu);
