@@ -35,4 +35,5 @@ obj-$(CONFIG_S390_IOMMU) += s390-iommu.o
 obj-$(CONFIG_QTI_IOMMU_SUPPORT) += iommu-logger.o
 obj-$(CONFIG_QCOM_IOMMU) += qcom_iommu.o
 
-obj-$(CONFIG_DEBUG_KERNEL) += arm-smmu-debug.o iommu-debug.o iommu-traces.o
+obj-$(CONFIG_DEBUG_KERNEL) += arm-smmu-debug.o iommu-debug.o
+obj-$(CONFIG_FTRACE) += iommu-traces.o
