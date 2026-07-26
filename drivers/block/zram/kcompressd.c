@@ -96,13 +96,18 @@ static int init_write_queue(void)
 		if (kfifo_alloc(&kcompress[i].write_fifo,
 					queue_len, GFP_KERNEL)) {
 			pr_err("Failed to alloc kfifo %d\n", i);
-			return -ENOMEM;
+			goto free_queues;
 		}
 	}
 	return 0;
+
+free_queues:
+	while (--i >= 0)
+		kfifo_free(&kcompress[i].write_fifo);
+	return -ENOMEM;
 }
 
-static void clean_bio_queue(int idx)
+static void drain_bio_queue(int idx)
 {
 	struct write_work entry;
 
@@ -111,6 +116,11 @@ static void clean_bio_queue(int idx)
 		entry.cb(entry.mem, entry.bio);
 		bio_put(entry.bio);
 	}
+}
+
+static void clean_bio_queue(int idx)
+{
+	drain_bio_queue(idx);
 	kfifo_free(&kcompress[idx].write_fifo);
 }
 
@@ -119,28 +129,48 @@ static int kcompress_update(void)
 	int i;
 	int ret;
 
-	kcompress = kvmalloc_array(nr_kcompressd, sizeof(struct kcompress), GFP_KERNEL);
+	/*
+	 * schedule_bio_write() uses ->running to decide whether it must create
+	 * or wake a worker.  kvmalloc_array() does not zero its allocation, so
+	 * an arbitrary initial value can bypass every run_state case after the
+	 * bio has already been queued.  With no consumer, all four FIFOs fill
+	 * and every queued swap page remains under PG_writeback indefinitely.
+	 */
+	kcompress = kvcalloc(nr_kcompressd, sizeof(struct kcompress), GFP_KERNEL);
 	if (!kcompress)
 		return -ENOMEM;
 
-	kcompressd_para = kvmalloc_array(nr_kcompressd, sizeof(struct kcompressd_para), GFP_KERNEL);
-	if (!kcompressd_para)
-		return -ENOMEM;
+	kcompressd_para = kvcalloc(nr_kcompressd,
+				  sizeof(struct kcompressd_para), GFP_KERNEL);
+	if (!kcompressd_para) {
+		ret = -ENOMEM;
+		goto free_kcompress;
+	}
 
 	ret = init_write_queue();
 	if (ret) {
 		pr_err("Initialization of writing to FIFOs failed!!\n");
-		return ret;
+		goto free_para;
 	}
 
 	for (i = 0; i < nr_kcompressd; i++) {
 		init_waitqueue_head(&kcompress[i].kcompressd_wait);
+		atomic_set(&kcompress[i].running, KCOMPRESSD_NOT_STARTED);
+		kcompress[i].kcompressd = NULL;
 		kcompressd_para[i].kcompressd_wait = &kcompress[i].kcompressd_wait;
 		kcompressd_para[i].write_fifo = &kcompress[i].write_fifo;
 		kcompressd_para[i].running = &kcompress[i].running;
 	}
 
 	return 0;
+
+free_para:
+	kvfree(kcompressd_para);
+	kcompressd_para = NULL;
+free_kcompress:
+	kvfree(kcompress);
+	kcompress = NULL;
+	return ret;
 }
 
 static void stop_all_kcompressd_thread(void)
@@ -148,7 +178,8 @@ static void stop_all_kcompressd_thread(void)
 	int i;
 
 	for (i = 0; i < nr_kcompressd; i++) {
-		kthread_stop(kcompress[i].kcompressd);
+		if (kcompress[i].kcompressd)
+			kthread_stop(kcompress[i].kcompressd);
 		kcompress[i].kcompressd = NULL;
 		clean_bio_queue(i);
 	}
@@ -158,7 +189,7 @@ static atomic_t next_kcompressd_idx = ATOMIC_INIT(0);
 
 int schedule_bio_write(void *mem, struct bio *bio, compress_callback cb)
 {
-	int i, start_idx, idx;
+	int i, start_idx, idx, state;
 	bool submit_success = false;
 	size_t sz_work = sizeof(struct write_work);
 
@@ -187,17 +218,35 @@ int schedule_bio_write(void *mem, struct bio *bio, compress_callback cb)
 			(sz_work == kfifo_in(&kcompress[idx].write_fifo, &entry, sz_work));
 
 		if (submit_success) {
-			switch (atomic_read(&kcompress[idx].running)) {
+			state = atomic_read(&kcompress[idx].running);
+			switch (state) {
+			default:
+				pr_warn_ratelimited("Invalid kcompressd:%d state %d, restarting\n",
+						    idx, state);
+				if (kcompress[idx].kcompressd) {
+					atomic_set(&kcompress[idx].running,
+						   KCOMPRESSD_RUNNING);
+					wake_up_interruptible(
+						&kcompress[idx].kcompressd_wait);
+					break;
+				}
+				fallthrough;
 			case KCOMPRESSD_NOT_STARTED:
 				atomic_set(&kcompress[idx].running, KCOMPRESSD_RUNNING);
 				kcompress[idx].kcompressd = kthread_run(kcompressd,
 						&kcompressd_para[idx], "kcompressd:%d", idx);
 				if (IS_ERR(kcompress[idx].kcompressd)) {
+					kcompress[idx].kcompressd = NULL;
 					atomic_set(&kcompress[idx].running, KCOMPRESSD_NOT_STARTED);
 					pr_warn("Failed to start kcompressd:%d\n", idx);
-					clean_bio_queue(idx);
-					bio_put(bio);
-					return -EBUSY;
+					/*
+					 * The work is already in the FIFO.  Complete
+					 * it synchronously and report success so zram
+					 * does not submit the same bio a second time.
+					 * Keep the FIFO allocated for a later retry.
+					 */
+					drain_bio_queue(idx);
+					return 0;
 				}
 				break;
 			case KCOMPRESSD_RUNNING:
