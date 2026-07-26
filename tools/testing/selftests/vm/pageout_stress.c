@@ -61,6 +61,7 @@ static char memcg_a_procs[PATH_MAX], memcg_b_procs[PATH_MAX];
 
 static long stat_ok, stat_bytes, stat_err[64];
 static long stat_memcg_ok, stat_memcg_err;
+static volatile sig_atomic_t stop_signal;
 
 struct child {
 	pid_t pid;
@@ -72,6 +73,26 @@ struct child {
 static int pidfd_open(pid_t pid)
 {
 	return (int)syscall(__NR_pidfd_open, pid, 0);
+}
+
+static void request_stop(int sig)
+{
+	stop_signal = sig;
+}
+
+static int install_signal_handlers(void)
+{
+	struct sigaction sa = {
+		.sa_handler = request_stop,
+	};
+
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGINT, &sa, NULL) ||
+	    sigaction(SIGTERM, &sa, NULL) ||
+	    sigaction(SIGHUP, &sa, NULL))
+		return -errno;
+
+	return 0;
 }
 
 static ssize_t pageout(int pidfd, void *base, size_t len)
@@ -190,7 +211,7 @@ static void child_main(int wfd)
 	if (write(wfd, &p, sizeof(p)) != sizeof(p))
 		_exit(1);
 	close(wfd);
-	for (unsigned int n = 0;; n++) {
+	for (unsigned int n = 0; !stop_signal; n++) {
 		/* touch 1/16 of the range to force refaults after pageout */
 		for (i = 0; i < len / 16; i += 4096)
 			p[i]++;
@@ -209,14 +230,16 @@ static void child_main(int wfd)
 		}
 		usleep(20000);
 	}
+	_exit(128 + stop_signal);
 }
 
-static void spawn_child(struct child *c)
+static int spawn_child(struct child *c)
 {
 	int pfd[2];
+	ssize_t bytes;
 
 	if (pipe(pfd))
-		exit(1);
+		return -errno;
 	c->len = child_mib << 20;
 	c->pid = fork();
 	if (c->pid == 0) {
@@ -224,19 +247,50 @@ static void spawn_child(struct child *c)
 		child_main(pfd[1]);
 		_exit(0);
 	}
+	if (c->pid < 0) {
+		int saved = errno;
+
+		close(pfd[0]);
+		close(pfd[1]);
+		return -saved;
+	}
 	close(pfd[1]);
-	if (read(pfd[0], &c->base, sizeof(c->base)) != sizeof(c->base))
-		exit(1);
+	do {
+		bytes = read(pfd[0], &c->base, sizeof(c->base));
+	} while (bytes < 0 && errno == EINTR && !stop_signal);
 	close(pfd[0]);
+	if (bytes != sizeof(c->base)) {
+		kill(c->pid, SIGKILL);
+		while (waitpid(c->pid, NULL, 0) < 0 && errno == EINTR)
+			;
+		c->pid = -1;
+		return stop_signal ? -EINTR : -EIO;
+	}
 	c->pidfd = pidfd_open(c->pid);
+	if (c->pidfd < 0) {
+		int saved = errno;
+
+		kill(c->pid, SIGKILL);
+		while (waitpid(c->pid, NULL, 0) < 0 && errno == EINTR)
+			;
+		c->pid = -1;
+		return -saved;
+	}
+
+	return 0;
 }
 
 static void reap_child(struct child *c)
 {
+	if (c->pid <= 0)
+		return;
 	kill(c->pid, SIGKILL);
-	waitpid(c->pid, NULL, 0);
+	while (waitpid(c->pid, NULL, 0) < 0 && errno == EINTR)
+		;
 	if (c->pidfd >= 0)
 		close(c->pidfd);
+	c->pid = -1;
+	c->pidfd = -1;
 }
 
 struct race_arg {
@@ -297,10 +351,25 @@ int main(int argc, char **argv)
 	kids = calloc(nchildren, sizeof(*kids));
 	if (!kids)
 		return 2;
+	for (i = 0; i < nchildren; i++) {
+		kids[i].pid = -1;
+		kids[i].pidfd = -1;
+	}
+	if (install_signal_handlers()) {
+		perror("install signal handlers");
+		return 2;
+	}
 	if (setup_memcgs())
 		return 2;
 	for (i = 0; i < nchildren; i++) {
-		spawn_child(&kids[i]);
+		int err = spawn_child(&kids[i]);
+
+		if (err) {
+			errno = -err;
+			perror("spawn child");
+			rc = stop_signal ? 128 + stop_signal : 2;
+			goto out;
+		}
 		spawned++;
 		if (memcg_root && move_to_memcg(kids[i].pid, memcg_a_procs)) {
 			perror("place child in memcg A");
@@ -309,8 +378,13 @@ int main(int argc, char **argv)
 		}
 	}
 
+	printf("START pid=%d iterations=%ld children=%d child_mib=%zu memcg=%s\n",
+	       getpid(), iterations, nchildren, child_mib,
+	       memcg_root ? memcg_root : "off");
+	fflush(stdout);
+
 	srandom(getpid());
-	for (it = 0; it < iterations; it++) {
+	for (it = 0; it < iterations && !stop_signal; it++) {
 		struct child *c = &kids[it % nchildren];
 		int mode = it % 8;
 		pthread_t th;
@@ -355,9 +429,17 @@ int main(int argc, char **argv)
 			}
 		}
 		if (mode == 5) {
+			int err;
+
 			/* child may be dead; respawn to keep pressure up */
 			reap_child(c);
-			spawn_child(c);
+			err = spawn_child(c);
+			if (err) {
+				errno = -err;
+				perror("replace child");
+				rc = stop_signal ? 128 + stop_signal : 2;
+				goto out;
+			}
 			if (memcg_root &&
 			    move_to_memcg(c->pid, memcg_a_procs)) {
 				perror("replace child in memcg A");
@@ -383,6 +465,8 @@ out:
 	for (i = 0; i < spawned; i++)
 		reap_child(&kids[i]);
 	cleanup_memcgs();
+	if (!rc && stop_signal)
+		rc = 128 + stop_signal;
 	if (rc)
 		return rc;
 	printf("DONE iterations=%ld ok=%ld bytes=%ldM memcg=%ld/%ld\n",
