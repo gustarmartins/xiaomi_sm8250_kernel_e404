@@ -3658,10 +3658,6 @@ static void __cgroup_kill(struct cgroup *cgrp)
 
 	lockdep_assert_held(&cgroup_mutex);
 
-	spin_lock_irq(&css_set_lock);
-	set_bit(CGRP_KILL, &cgrp->flags);
-	spin_unlock_irq(&css_set_lock);
-
 	css_task_iter_start(&cgrp->self,
 			    CSS_TASK_ITER_PROCS | CSS_TASK_ITER_THREADED, &it);
 	while ((task = css_task_iter_next(&it))) {
@@ -3676,10 +3672,6 @@ static void __cgroup_kill(struct cgroup *cgrp)
 		send_sig(SIGKILL, task, 0);
 	}
 	css_task_iter_end(&it);
-
-	spin_lock_irq(&css_set_lock);
-	clear_bit(CGRP_KILL, &cgrp->flags);
-	spin_unlock_irq(&css_set_lock);
 }
 
 static void cgroup_kill(struct cgroup *cgrp)
@@ -3689,8 +3681,16 @@ static void cgroup_kill(struct cgroup *cgrp)
 
 	lockdep_assert_held(&cgroup_mutex);
 
+	/*
+	 * This 4.19 tree has no kernel_clone_args slot in which to preserve
+	 * the per-cgroup kill sequence used by newer kernels. Exclude the
+	 * complete can_fork()..post_fork() interval instead, so no child can
+	 * escape after the task iterator has passed its parent.
+	 */
+	percpu_down_write(&cgroup_threadgroup_rwsem);
 	cgroup_for_each_live_descendant_pre(dsct, css, cgrp)
 		__cgroup_kill(dsct);
+	percpu_up_write(&cgroup_threadgroup_rwsem);
 }
 
 static ssize_t cgroup_kill_write(struct kernfs_open_file *of, char *buf,
@@ -6050,7 +6050,6 @@ void cgroup_cancel_fork(struct task_struct *child)
  */
 void cgroup_post_fork(struct task_struct *child)
 {
-	bool kill = false;
 	struct cgroup_subsys *ss;
 	int i;
 
@@ -6077,11 +6076,9 @@ void cgroup_post_fork(struct task_struct *child)
 	 */
 	if (use_task_css_set_links) {
 		struct css_set *cset;
-		unsigned long cgrp_flags;
 
 		spin_lock_irq(&css_set_lock);
 		cset = task_css_set(current);
-		cgrp_flags = cset->dfl_cgrp->flags;
 		if (list_empty(&child->cg_list)) {
 			get_css_set(cset);
 			cset->nr_tasks++;
@@ -6107,9 +6104,6 @@ void cgroup_post_fork(struct task_struct *child)
 			 */
 		}
 
-		if (!(child->flags & PF_KTHREAD))
-			kill = test_bit(CGRP_KILL, &cgrp_flags);
-
 		spin_unlock_irq(&css_set_lock);
 	}
 
@@ -6121,10 +6115,6 @@ void cgroup_post_fork(struct task_struct *child)
 	do_each_subsys_mask(ss, i, have_fork_callback) {
 		ss->fork(child);
 	} while_each_subsys_mask();
-
-	/* Cgroup has to be killed so take down child immediately. */
-	if (unlikely(kill))
-		do_send_sig_info(SIGKILL, SEND_SIG_NOINFO, child, PIDTYPE_TGID);
 }
 
 /**
