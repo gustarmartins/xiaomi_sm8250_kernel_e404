@@ -826,6 +826,17 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 		no_page_fault_log = kgsl_mmu_log_fault_addr(mmu, ptbase, addr);
 
 	if (!no_page_fault_log && __ratelimit(&_rs)) {
+		/*
+		 * E404 stubs the tree-wide dev_* logging macros and KGSL
+		 * tracepoints, but leaves this ratelimiter active. Keep one
+		 * narrow diagnostic line so a reported suppression burst can be
+		 * attributed without re-enabling unrelated kernel logging.
+		 */
+		pr_crit("KGSL_DIAG_PAGE_FAULT dev=%s iova=0x%lx pid=%d comm=%s context=%s ttbr0=0x%llx cidr=0x%x access=%s type=%s flags=0x%x\n",
+			dev_name(ctx->kgsldev->dev), addr, ptname, comm, ctx->name,
+			ptbase, contextidr, write ? "write" : "read", fault_type,
+			flags);
+
 		dev_crit(ctx->kgsldev->dev,
 			"GPU PAGE FAULT: addr = %lX pid= %d name=%s\n", addr,
 			ptname, comm);
