@@ -61,6 +61,14 @@ static inline void cfs_se_util_change(struct sched_avg *avg)
 	WRITE_ONCE(avg->util_est, enqueued);
 }
 
+static inline u64 rq_clock_task_mult(struct rq *rq)
+{
+	lockdep_assert_held(&rq->lock);
+	assert_clock_updated(rq);
+
+	return rq->clock_task_mult;
+}
+
 static inline u64 rq_clock_pelt(struct rq *rq)
 {
 	lockdep_assert_held(&rq->lock);
@@ -69,10 +77,10 @@ static inline u64 rq_clock_pelt(struct rq *rq)
 	return rq->clock_pelt - rq->lost_idle_time;
 }
 
-/* The rq is idle, we can sync to clock_task */
+/* The rq is idle, we can sync to the multiplied task clock. */
 static inline void _update_idle_rq_clock_pelt(struct rq *rq)
 {
-	rq->clock_pelt  = rq_clock_task(rq);
+	rq->clock_pelt = rq_clock_task_mult(rq);
 
 	u64_u32_store(rq->clock_idle, rq_clock(rq));
 	/* Paired with smp_rmb in migrate_se_pelt_lag() */
@@ -121,6 +129,20 @@ static inline void update_rq_clock_pelt(struct rq *rq, s64 delta)
 	rq->clock_pelt += delta;
 }
 
+extern unsigned int sched_pelt_lshift;
+
+/*
+ * Speed up PELT by advancing a monotonic clock instead of replacing decay
+ * tables while scheduler readers are active.  With munch's fixed 16 ms base,
+ * multipliers 1 and 2 provide effective 16 ms and 8 ms half-lives.
+ */
+static inline void update_rq_clock_task_mult(struct rq *rq, s64 delta)
+{
+	delta <<= READ_ONCE(sched_pelt_lshift);
+	rq->clock_task_mult += delta;
+	update_rq_clock_pelt(rq, delta);
+}
+
 /*
  * When rq becomes idle, we have to check if it has lost idle time
  * because it was fully busy. A rq is fully used when the /Sum util_sum
@@ -147,7 +169,7 @@ static inline void update_idle_rq_clock_pelt(struct rq *rq)
 	 * rq's clock_task.
 	 */
 	if (util_sum >= divider)
-		rq->lost_idle_time += rq_clock_task(rq) - rq->clock_pelt;
+		rq->lost_idle_time += rq_clock_task_mult(rq) - rq->clock_pelt;
 
 	_update_idle_rq_clock_pelt(rq);
 }
@@ -223,13 +245,17 @@ static inline u64 rq_clock_pelt(struct rq *rq)
 	return rq_clock_task(rq);
 }
 
+static inline u64 rq_clock_task_mult(struct rq *rq)
+{
+	return rq_clock_task(rq);
+}
+
 static inline void
-update_rq_clock_pelt(struct rq *rq, s64 delta) { }
+update_rq_clock_task_mult(struct rq *rq, s64 delta) { }
 
 static inline void
 update_idle_rq_clock_pelt(struct rq *rq) { }
 
 static inline void update_idle_cfs_rq_clock_pelt(struct cfs_rq *cfs_rq) { }
 #endif
-
 

@@ -121,11 +121,11 @@ extern unsigned int sysctl_sched_uclamp_util_max;
 extern unsigned int sysctl_sched_uclamp_util_min_rt_default;
 #endif
 
-/* Runtime PELT half-life tunable (8, 16 or 32 ms) */
-extern unsigned int sysctl_sched_pelt_halflife;
-extern int sysctl_sched_pelt_halflife_handler(struct ctl_table *table,
-					      int write, void __user *buffer,
-					      size_t *lenp, loff_t *ppos);
+#ifdef CONFIG_SMP
+extern unsigned int sysctl_sched_pelt_multiplier;
+int sched_pelt_multiplier(struct ctl_table *table, int write,
+			  void __user *buffer, size_t *lenp, loff_t *ppos);
+#endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
 extern unsigned int sysctl_sched_cfs_bandwidth_slice;
