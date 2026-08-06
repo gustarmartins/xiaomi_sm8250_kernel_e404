@@ -207,6 +207,54 @@ static int alloc_pagecache_50M_noexit(const char *cgroup, void *arg)
 	return 0;
 }
 
+/*
+ * This test checks that memory.reclaim can proactively reclaim page cache
+ * from a cgroup without changing one of its memory limits.
+ */
+static int test_memcg_reclaim(const char *root)
+{
+	int ret = KSFT_FAIL;
+	long current, after;
+	char *memcg = NULL;
+	int fd = -1;
+
+	memcg = cg_name(root, "memcg_test");
+	if (!memcg)
+		goto cleanup;
+
+	if (cg_create(memcg))
+		goto cleanup;
+
+	fd = get_temp_fd();
+	if (fd < 0)
+		goto cleanup;
+
+	if (cg_run(memcg, alloc_pagecache_50M, (void *)(long)fd))
+		goto cleanup;
+
+	current = cg_read_long(memcg, "memory.current");
+	if (current < MB(50))
+		goto cleanup;
+
+	if (cg_write(memcg, "memory.reclaim", "30M"))
+		goto cleanup;
+
+	after = cg_read_long(memcg, "memory.current");
+	if (after < 0 || current - after < MB(30))
+		goto cleanup;
+
+	ret = KSFT_PASS;
+
+cleanup:
+	if (fd >= 0)
+		close(fd);
+	if (memcg)
+		cg_destroy(memcg);
+	free(memcg);
+
+	return ret;
+}
+
 static int alloc_anon_noexit(const char *cgroup, void *arg)
 {
 	int ppid = getppid();
@@ -1177,6 +1225,7 @@ struct memcg_test {
 } tests[] = {
 	T(test_memcg_subtree_control),
 	T(test_memcg_current),
+	T(test_memcg_reclaim),
 	T(test_memcg_min),
 	T(test_memcg_low),
 	T(test_memcg_high),
