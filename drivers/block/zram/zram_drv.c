@@ -2463,6 +2463,8 @@ static ssize_t disksize_store(struct device *dev,
 
 out_free_comps:
 	zram_destroy_comps(zram);
+	/* Keep an uninitialized device's compressor sysfs state retryable. */
+	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
 	zram_meta_free(zram, disksize);
 out_unlock:
 	up_write(&zram->init_lock);

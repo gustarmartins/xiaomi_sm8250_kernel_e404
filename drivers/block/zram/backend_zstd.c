@@ -64,6 +64,10 @@ static int zstd_setup_params(struct zcomp_params *params)
 
 	zp->cprm = zstd_get_params(params->level, PAGE_SIZE);
 
+	/* Dictionary-free ZRAM uses the workspace-backed stream contexts. */
+	if (!params->dict_sz)
+		return 0;
+
 	zp->custom_mem.customAlloc = zstd_custom_alloc;
 	zp->custom_mem.customFree = zstd_custom_free;
 
