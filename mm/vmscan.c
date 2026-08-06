@@ -94,6 +94,9 @@ struct scan_control {
 	/* Can pages be swapped as part of reclaim? */
 	unsigned int may_swap:1;
 
+	/* Proactive reclaim invoked by userspace through memory.reclaim */
+	unsigned int proactive:1;
+
 	/* e.g. boosted watermark reclaim leaves slabs alone */
 	unsigned int may_shrinkslab:1;
 
@@ -5540,9 +5543,11 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 					sc->priority);
 
 			/* Record the group's reclaim efficiency */
-			vmpressure(sc->gfp_mask, memcg, false,
-				   sc->nr_scanned - scanned,
-				   sc->nr_reclaimed - reclaimed, sc->order);
+			if (!sc->proactive)
+				vmpressure(sc->gfp_mask, memcg, false,
+					   sc->nr_scanned - scanned,
+					   sc->nr_reclaimed - reclaimed,
+					   sc->order);
 
 			/*
 			 * Direct reclaim and kswapd have to scan all memory
@@ -5569,9 +5574,11 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 		 * making the cost model (i.e. scan:free) different from that
 		 * of LRU.
 		 */
-		vmpressure(sc->gfp_mask, sc->target_mem_cgroup, true,
-			   sc->nr_scanned - nr_scanned,
-			   sc->nr_reclaimed - nr_reclaimed, sc->order);
+		if (!sc->proactive)
+			vmpressure(sc->gfp_mask, sc->target_mem_cgroup, true,
+				   sc->nr_scanned - nr_scanned,
+				   sc->nr_reclaimed - nr_reclaimed,
+				   sc->order);
 
 		if (reclaim_state) {
 			sc->nr_reclaimed += reclaim_state->reclaimed_slab;
@@ -5830,8 +5837,9 @@ retry:
 		__count_zid_vm_events(ALLOCSTALL, sc->reclaim_idx, 1);
 
 	do {
-		vmpressure_prio(sc->gfp_mask, sc->target_mem_cgroup,
-				sc->priority, sc->order);
+		if (!sc->proactive)
+			vmpressure_prio(sc->gfp_mask, sc->target_mem_cgroup,
+					sc->priority, sc->order);
 		sc->nr_scanned = 0;
 		shrink_zones(zonelist, sc);
 
@@ -6123,7 +6131,7 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 					   unsigned long nr_pages,
 					   gfp_t gfp_mask,
-					   bool may_swap)
+					   unsigned int reclaim_options)
 {
 	struct zonelist *zonelist;
 	unsigned long nr_reclaimed;
@@ -6139,7 +6147,8 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.priority = DEF_PRIORITY,
 		.may_writepage = !laptop_mode,
 		.may_unmap = 1,
-		.may_swap = may_swap,
+		.may_swap = !!(reclaim_options & MEMCG_RECLAIM_MAY_SWAP),
+		.proactive = !!(reclaim_options & MEMCG_RECLAIM_PROACTIVE),
 		.may_shrinkslab = 1,
 	};
 
