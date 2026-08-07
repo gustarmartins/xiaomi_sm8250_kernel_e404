@@ -496,7 +496,12 @@ int update_irq_load_avg(struct rq *rq, u64 running)
 #endif
 
 __read_mostly unsigned int sched_pelt_lshift;
+#ifdef CONFIG_BOARD_MUNCH
+/* Use the validated effective 8 ms response with the fixed 16 ms tables. */
+unsigned int sysctl_sched_pelt_multiplier = 2;
+#else
 unsigned int sysctl_sched_pelt_multiplier = 1;
+#endif
 
 int sched_pelt_multiplier(struct ctl_table *table, int write,
 			  void __user *buffer, size_t *lenp, loff_t *ppos)

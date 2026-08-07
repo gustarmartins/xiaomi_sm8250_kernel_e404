@@ -4049,6 +4049,16 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	if (!mem_cgroup_disabled() && !memcg)
 		return;
 
+	/*
+	 * page_update_gen() and the fallback activation path both require a
+	 * stable page_memcg().  Take this lock before clearing any accessed
+	 * bits: if account migration is in progress, returning after the PTE
+	 * walk would otherwise discard the access evidence without promoting
+	 * the hot pages.
+	 */
+	if (!mem_cgroup_trylock_pages(memcg))
+		return;
+
 	lruvec = mem_cgroup_lruvec(pgdat, memcg);
 	max_seq = READ_ONCE(lruvec->lrugen.max_seq);
 	new_gen = lru_gen_from_seq(max_seq);
@@ -4128,12 +4138,9 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 			page_clear_lru_refs(page);
 			activate_page(page);
 		}
+		mem_cgroup_unlock_pages();
 		return;
 	}
-
-	/* page_update_gen() requires stable page_memcg() */
-	if (!mem_cgroup_trylock_pages(memcg))
-		return;
 
 	if (!walk) {
 		spin_lock_irq(&pgdat->lru_lock);

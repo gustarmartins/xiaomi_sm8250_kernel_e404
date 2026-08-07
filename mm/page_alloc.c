@@ -336,7 +336,12 @@ int watermark_boost_factor __read_mostly;
 #else
 int watermark_boost_factor __read_mostly = 0;
 #endif
+#ifdef CONFIG_BOARD_MUNCH
+/* Preserve allocator runway for camera/GPU high-order bursts on Poco F4. */
+int watermark_scale_factor = 50;
+#else
 int watermark_scale_factor = 10;
+#endif
 
 /*
  * Extra memory for the system to try freeing. Used to temporarily
@@ -7891,6 +7896,14 @@ int __meminit init_per_zone_wmark_min(void)
 			min_free_kbytes = 128;
 		if (min_free_kbytes > 65536)
 			min_free_kbytes = 65536;
+#ifdef CONFIG_BOARD_MUNCH
+		/*
+		 * The generic sqrt heuristic left this 8 GiB device with only
+		 * about 7 MiB at WMARK_MIN. Camera and GPU bursts then entered
+		 * synchronous reclaim/compaction with no CMA headroom.
+		 */
+		min_free_kbytes = max(min_free_kbytes, 65536);
+#endif
 	} else {
 		pr_warn("min_free_kbytes is not updated to %d because user defined value %d is preferred\n",
 				new_min_free_kbytes, user_min_free_kbytes);
