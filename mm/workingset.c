@@ -271,15 +271,15 @@ void lru_gen_refault(struct page *page, void *shadow)
 	unpack_shadow(shadow, &memcg_id, &pgdat, &token, &workingset);
 
 	refs = token & (BIT(LRU_REFS_WIDTH) - 1);
-	if (refs && !workingset)
-		return;
 
 	if (page_pgdat(page) != pgdat)
 		return;
 
 	rcu_read_lock();
-	memcg = mem_cgroup_from_id(memcg_id);
+	memcg = page_memcg_rcu(page);
 	if (!mem_cgroup_disabled() && !memcg)
+		goto unlock;
+	if (memcg_id != mem_cgroup_id(memcg))
 		goto unlock;
 
 	token >>= LRU_REFS_WIDTH;
