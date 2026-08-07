@@ -4533,6 +4533,36 @@ done:
 	return min_seq[!can_swap] + MIN_NR_GENS <= max_seq ? nr_to_scan : 0;
 }
 
+static bool should_abort_lru_gen_scan(struct lruvec *lruvec,
+				      struct scan_control *sc,
+				      unsigned long reclaimed)
+{
+	int i;
+
+	/* Memcg reclaim must keep its normal fairness semantics. */
+	if (!global_reclaim(sc))
+		return false;
+
+	if (sc->nr_reclaimed - reclaimed >=
+	    max(sc->nr_to_reclaim, compact_gap(sc->order)))
+		return true;
+
+	/* High-watermark stopping is for order-0 kswapd, not compaction. */
+	if (!current_is_kswapd() || sc->order)
+		return false;
+
+	for (i = 0; i <= sc->reclaim_idx; i++) {
+		struct zone *zone = lruvec_pgdat(lruvec)->node_zones + i;
+		unsigned long mark = high_wmark_pages(zone) + MIN_LRU_BATCH;
+
+		if (managed_zone(zone) &&
+		    !zone_watermark_ok(zone, 0, mark, sc->reclaim_idx, 0))
+			return false;
+	}
+
+	return true;
+}
+
 static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	struct blk_plug plug;
@@ -4574,6 +4604,8 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 
 		scanned += delta;
 		if (scanned >= nr_to_scan)
+			break;
+		if (should_abort_lru_gen_scan(lruvec, sc, reclaimed))
 			break;
 
 		cond_resched();
