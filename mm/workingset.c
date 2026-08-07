@@ -215,16 +215,6 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 
 #ifdef CONFIG_LRU_GEN
 
-static int page_lru_refs(struct page *page)
-{
-	unsigned long flags = READ_ONCE(page->flags);
-
-	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_WIDTH > BITS_PER_LONG - EVICTION_SHIFT);
-
-	/* see the comment on MAX_NR_TIERS */
-	return flags & BIT(PG_workingset) ? (flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF : 0;
-}
-
 void *lru_gen_eviction(struct page *page)
 {
 	int hist, tier;
@@ -238,6 +228,9 @@ void *lru_gen_eviction(struct page *page)
 	bool workingset = PageWorkingset(page);
 	struct mem_cgroup *memcg = page_memcg(page);
 	struct pglist_data *pgdat = page_pgdat(page);
+
+	BUILD_BUG_ON(LRU_GEN_WIDTH + LRU_REFS_WIDTH >
+		     BITS_PER_LONG - EVICTION_SHIFT);
 
 	if (!mem_cgroup_disabled() && !memcg)
 		return NULL;
@@ -301,11 +294,11 @@ void lru_gen_refault(struct page *page, void *shadow)
 	 * Count the following two cases as stalls:
 	 * 1. For pages accessed through page tables, hotter pages pushed out
 	 *    hot pages which refaulted immediately.
-	 * 2. For pages accessed through file descriptors, numbers of accesses
-	 *    might have been beyond the limit.
+	 * 2. Pages accessed repeatedly through file descriptors would have been
+	 *    protected by sort_page().
 	 */
-	if (lru_gen_in_fault() || refs + workingset == BIT(LRU_REFS_WIDTH)) {
-		SetPageWorkingset(page);
+	if (lru_gen_in_fault() || refs + workingset >= BIT(LRU_REFS_WIDTH) - 1) {
+		set_mask_bits(&page->flags, 0, LRU_REFS_MASK | BIT(PG_workingset));
 		mod_lruvec_state(lruvec, WORKINGSET_RESTORE, delta);
 	}
 unlock:

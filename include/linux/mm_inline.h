@@ -123,8 +123,22 @@ static inline int lru_tier_from_refs(int refs)
 {
 	VM_BUG_ON(refs > BIT(LRU_REFS_WIDTH));
 
-	/* see the comment on MAX_NR_TIERS */
+	/* see the comment in page_lru_refs() */
 	return order_base_2(refs + 1);
+}
+
+static inline int page_lru_refs(struct page *page)
+{
+	unsigned long flags = READ_ONCE(page->flags);
+	bool workingset = flags & BIT(PG_workingset);
+
+	/* N=0 and N=1 both map to the first tier. */
+	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + workingset;
+}
+
+static inline void page_clear_lru_refs(struct page *page)
+{
+	set_mask_bits(&page->flags, LRU_REFS_MASK | LRU_REFS_FLAGS, 0);
 }
 
 static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
@@ -186,7 +200,9 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
 static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
 {
 	int gen;
+	unsigned long seq;
 	unsigned long old_flags, new_flags;
+	bool active = PageActive(page);
 	int type = page_is_file_cache(page);
 	int zone = page_zonenum(page);
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
@@ -194,21 +210,26 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 	if (PageUnevictable(page) || !lrugen->enabled)
 		return false;
 	/*
-	 * There are three common cases for this page:
-	 * 1. If it's hot, e.g., freshly faulted in or previously hot and
-	 *    migrated, add it to the youngest generation.
-	 * 2. If it's cold but can't be evicted immediately, i.e., an anon page
-	 *    not in swapcache or a dirty page pending writeback, add it to the
-	 *    second oldest generation.
-	 * 3. Everything else (clean, cold) is added to the oldest generation.
+	 * There are four common cases for this page:
+	 * 1. Freshly faulted or otherwise active pages go to the youngest
+	 *    generation.
+	 * 2. Pages that cannot be evicted immediately go to the second youngest
+	 *    generation.
+	 * 3. Pages returned directly by reclaim go to the oldest generation.
+	 * 4. Other inactive pages get the second oldest generation when the
+	 *    generation window is wide enough for it to be meaningful.
 	 */
-	if (PageActive(page))
-		gen = lru_gen_from_seq(lrugen->max_seq);
+	if (active)
+		seq = lrugen->max_seq;
 	else if ((type == LRU_GEN_ANON && !PageSwapCache(page)) ||
 		 (PageReclaim(page) && (PageDirty(page) || PageWriteback(page))))
-		gen = lru_gen_from_seq(lrugen->min_seq[type] + 1);
+		seq = lrugen->max_seq - 1;
+	else if (reclaiming || lrugen->min_seq[type] + MIN_NR_GENS >= lrugen->max_seq)
+		seq = lrugen->min_seq[type];
 	else
-		gen = lru_gen_from_seq(lrugen->min_seq[type]);
+		seq = lrugen->min_seq[type] + 1;
+
+	gen = lru_gen_from_seq(seq);
 
 	do {
 		new_flags = old_flags = READ_ONCE(page->flags);
@@ -216,6 +237,9 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 
 		/* see the comment on MIN_NR_GENS */
 		new_flags &= ~(LRU_GEN_MASK | BIT(PG_active));
+		/* Keep PG_workingset so refault PSI accounting is not lost. */
+		if (active)
+			new_flags &= ~(LRU_REFS_MASK | BIT(PG_referenced));
 		new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
