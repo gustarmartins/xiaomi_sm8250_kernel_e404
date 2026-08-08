@@ -71,6 +71,12 @@
 /* if low watermark of zones have reached, defer the refill in this window */
 #define ION_POOL_REFILL_DEFER_WINDOW_MS	10
 
+enum ion_pool_refill_reason {
+	ION_POOL_REFILL_TARGET_REACHED,
+	ION_POOL_REFILL_DEFERRED,
+	ION_POOL_REFILL_ALLOC_FAILED,
+};
+
 /**
  * struct ion_platform_heap - defines a heap in the given platform
  * @type:	type of the heap from ion_heap_type enum

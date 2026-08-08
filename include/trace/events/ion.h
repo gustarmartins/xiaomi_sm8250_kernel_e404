@@ -9,6 +9,7 @@
 #if !defined(_TRACE_ION_H) || defined(TRACE_HEADER_MULTI_READ)
 #define _TRACE_ION_H
 
+#include <linux/dma-direction.h>
 #include <linux/types.h>
 #include <linux/tracepoint.h>
 
@@ -167,7 +168,83 @@ DEFINE_EVENT(ion_access_cmo_class, ion_end_cpu_access_notmapped,
 
 	TP_ARGS(dev, name, cached, hlos_accessible, dir, only_mapped)
 );
+
+TRACE_EVENT(ion_page_pool_buddy_alloc,
+
+	TP_PROTO(const void *pool, unsigned int order, bool cached,
+		 unsigned long pool_pages, bool pool_requested,
+		 bool lock_contended, int errorno),
+
+	TP_ARGS(pool, order, cached, pool_pages, pool_requested,
+		lock_contended, errorno),
+
+	TP_STRUCT__entry(
+		__field(const void *, pool)
+		__field(unsigned int, order)
+		__field(bool, cached)
+		__field(unsigned long, pool_pages)
+		__field(bool, pool_requested)
+		__field(bool, lock_contended)
+		__field(int, errorno)
+	),
+
+	TP_fast_assign(
+		__entry->pool = pool;
+		__entry->order = order;
+		__entry->cached = cached;
+		__entry->pool_pages = pool_pages;
+		__entry->pool_requested = pool_requested;
+		__entry->lock_contended = lock_contended;
+		__entry->errorno = errorno;
+	),
+
+	TP_printk("pool=%p order=%u cached=%d pool_pages=%lu requested=%d contended=%d errorno=%d",
+		  __entry->pool, __entry->order, __entry->cached,
+		  __entry->pool_pages, __entry->pool_requested,
+		  __entry->lock_contended, __entry->errorno)
+);
+
+TRACE_EVENT(ion_page_pool_refill,
+
+	TP_PROTO(const void *pool, unsigned int order, bool cached,
+		 unsigned long before_pages, unsigned long after_pages,
+		 unsigned long target_pages, int reason, s64 duration_ns),
+
+	TP_ARGS(pool, order, cached, before_pages, after_pages,
+		target_pages, reason, duration_ns),
+
+	TP_STRUCT__entry(
+		__field(const void *, pool)
+		__field(unsigned int, order)
+		__field(bool, cached)
+		__field(unsigned long, before_pages)
+		__field(unsigned long, after_pages)
+		__field(unsigned long, target_pages)
+		__field(int, reason)
+		__field(s64, duration_ns)
+	),
+
+	TP_fast_assign(
+		__entry->pool = pool;
+		__entry->order = order;
+		__entry->cached = cached;
+		__entry->before_pages = before_pages;
+		__entry->after_pages = after_pages;
+		__entry->target_pages = target_pages;
+		__entry->reason = reason;
+		__entry->duration_ns = duration_ns;
+	),
+
+	TP_printk("pool=%p order=%u cached=%d before_pages=%lu after_pages=%lu target_pages=%lu reason=%s duration_ns=%lld",
+		  __entry->pool, __entry->order, __entry->cached,
+		  __entry->before_pages, __entry->after_pages,
+		  __entry->target_pages,
+		  __print_symbolic(__entry->reason,
+			{ 0, "target" },
+			{ 1, "deferred" },
+			{ 2, "alloc_failed" }),
+		  (long long)__entry->duration_ns)
+);
 #endif /* _TRACE_ION_H */
 
 #include <trace/define_trace.h>
-

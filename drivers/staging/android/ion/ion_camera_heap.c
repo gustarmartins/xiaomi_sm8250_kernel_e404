@@ -140,9 +140,11 @@ void free_camera_buffer_page(struct ion_camera_heap *heap,
 		mod_node_page_state(page_pgdat(page), NR_UNRECLAIMABLE_PAGES,
 				    -(1 << pool->order));
 	} else {
-		__free_pages(page, order);
+		mod_node_page_state(page_pgdat(page), NR_ION_HEAP,
+				    -(1 << order));
 		mod_node_page_state(page_pgdat(page), NR_UNRECLAIMABLE_PAGES,
 				    -(1 << order));
+		__free_pages(page, order);
 	}
 }
 
