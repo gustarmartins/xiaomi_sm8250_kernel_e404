@@ -17,6 +17,7 @@ TEST_GEN_FILES += mlock-random-test
 TEST_GEN_FILES += mlock2-tests
 TEST_GEN_FILES += mrelease_test
 TEST_GEN_FILES += on-fault-limit
+TEST_GEN_FILES += pageout_stress
 TEST_GEN_FILES += thuge-gen
 TEST_GEN_FILES += transhuge-stress
 TEST_GEN_FILES += userfaultfd
@@ -31,5 +32,8 @@ KSFT_KHDR_INSTALL := 1
 include ../lib.mk
 
 $(OUTPUT)/userfaultfd: LDLIBS += -lpthread
+
+$(OUTPUT)/pageout_stress pageout_stress: CFLAGS += -pthread
+$(OUTPUT)/pageout_stress pageout_stress: LDLIBS += -lpthread
 
 $(OUTPUT)/mlock-random-test: LDLIBS += -lcap

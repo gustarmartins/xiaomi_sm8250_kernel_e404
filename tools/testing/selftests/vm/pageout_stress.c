@@ -21,7 +21,7 @@
  *   -i  total PAGEOUT iterations (default 10000, the K1 gate)
  *   -c  concurrent disposable children (default 4)
  *   -m  anon MiB dirtied per child (default 64)
- *   -g  cgroup-v1 memory root used for required memcg-move races
+ *   -g  cgroup-v1 memory or cgroup-v2 root used for memcg-move races
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -59,8 +59,18 @@ static const char *memcg_root;
 static char memcg_a[PATH_MAX], memcg_b[PATH_MAX];
 static char memcg_a_procs[PATH_MAX], memcg_b_procs[PATH_MAX];
 
+enum memcg_mode {
+	MEMCG_NONE,
+	MEMCG_V1,
+	MEMCG_V2,
+};
+
+static enum memcg_mode memcg_mode;
+static int memcg_cleanup_failed;
+
 static long stat_ok, stat_bytes, stat_err[64];
 static long stat_memcg_ok, stat_memcg_err;
+static unsigned long long stat_memcg_initial_bytes;
 static volatile sig_atomic_t stop_signal;
 
 struct child {
@@ -128,6 +138,34 @@ static int write_text(const char *path, const char *text)
 	return 0;
 }
 
+static int path_join(char *dst, size_t dst_size, const char *dir,
+		     const char *name)
+{
+	size_t dir_len = strlen(dir);
+	size_t name_len = strlen(name);
+
+	if (dir_len + 1 + name_len + 1 > dst_size)
+		return -ENAMETOOLONG;
+	memcpy(dst, dir, dir_len);
+	dst[dir_len] = '/';
+	memcpy(dst + dir_len + 1, name, name_len + 1);
+	return 0;
+}
+
+static int read_ull(const char *path, unsigned long long *value)
+{
+	FILE *file;
+	int ret;
+
+	file = fopen(path, "re");
+	if (!file)
+		return -errno;
+	ret = fscanf(file, "%llu", value);
+	if (fclose(file) && ret == 1)
+		return -errno;
+	return ret == 1 ? 0 : -EIO;
+}
+
 static int move_to_memcg(pid_t pid, const char *procs)
 {
 	char buf[32];
@@ -140,7 +178,7 @@ static void cleanup_memcgs(void);
 
 static int setup_memcgs(void)
 {
-	char move_charge[PATH_MAX];
+	char move_charge[PATH_MAX], controllers[PATH_MAX];
 
 	if (!memcg_root)
 		return 0;
@@ -157,41 +195,83 @@ static int setup_memcgs(void)
 		cleanup_memcgs();
 		return -errno;
 	}
-	snprintf(memcg_a_procs, sizeof(memcg_a_procs), "%s/cgroup.procs",
-		 memcg_a);
-	snprintf(memcg_b_procs, sizeof(memcg_b_procs), "%s/cgroup.procs",
-		 memcg_b);
+	if (path_join(memcg_a_procs, sizeof(memcg_a_procs), memcg_a,
+		      "cgroup.procs") ||
+	    path_join(memcg_b_procs, sizeof(memcg_b_procs), memcg_b,
+		      "cgroup.procs")) {
+		errno = ENAMETOOLONG;
+		perror("build memcg cgroup.procs path");
+		cleanup_memcgs();
+		return -errno;
+	}
+
+	/* Cgroup v1 can migrate existing anonymous and file charges. */
+	if (path_join(move_charge, sizeof(move_charge), memcg_a,
+		      "memory.move_charge_at_immigrate")) {
+		errno = ENAMETOOLONG;
+		perror("build memcg charge-migration path");
+		cleanup_memcgs();
+		return -errno;
+	}
+	if (!access(move_charge, F_OK)) {
+		memcg_mode = MEMCG_V1;
+		if (write_text(move_charge, "3")) {
+			perror("enable charge migration in memcg A");
+			cleanup_memcgs();
+			return -errno;
+		}
+		if (path_join(move_charge, sizeof(move_charge), memcg_b,
+			      "memory.move_charge_at_immigrate")) {
+			errno = ENAMETOOLONG;
+			perror("build memcg charge-migration path");
+			cleanup_memcgs();
+			return -errno;
+		}
+		if (write_text(move_charge, "3")) {
+			perror("enable charge migration in memcg B");
+			cleanup_memcgs();
+			return -errno;
+		}
+		return 0;
+	}
 
 	/*
-	 * Move both anonymous and file charges with the task. This makes the
-	 * migration overlap the same page and memcg lifetime paths exercised by
-	 * process_madvise instead of moving only future allocations.
+	 * Cgroup v2 deliberately has no charge-migration knob. Charge each
+	 * child in A before it allocates, then move the task between A and B
+	 * while its existing pages stay charged to A. This exercises page-memcg
+	 * lifetime, task/current-memcg mismatch, fork/COW, and cgroup teardown
+	 * without pretending v2 moves existing charges.
 	 */
-	snprintf(move_charge, sizeof(move_charge),
-		 "%s/memory.move_charge_at_immigrate", memcg_a);
-	if (write_text(move_charge, "3")) {
-		perror("enable charge migration in memcg A");
+	if (path_join(controllers, sizeof(controllers), memcg_root,
+		      "cgroup.controllers")) {
+		errno = ENAMETOOLONG;
+		perror("build cgroup-v2 controller path");
 		cleanup_memcgs();
 		return -errno;
 	}
-	snprintf(move_charge, sizeof(move_charge),
-		 "%s/memory.move_charge_at_immigrate", memcg_b);
-	if (write_text(move_charge, "3")) {
-		perror("enable charge migration in memcg B");
-		cleanup_memcgs();
-		return -errno;
+	if (!access(controllers, F_OK)) {
+		memcg_mode = MEMCG_V2;
+		return 0;
 	}
-	return 0;
+
+	errno = EOPNOTSUPP;
+	perror("unsupported memory-cgroup hierarchy");
+	cleanup_memcgs();
+	return -errno;
 }
 
 static void cleanup_memcgs(void)
 {
 	if (!memcg_root)
 		return;
-	if (rmdir(memcg_a))
-		perror("rmdir memcg A");
-	if (rmdir(memcg_b))
+	if (rmdir(memcg_b)) {
 		perror("rmdir memcg B");
+		memcg_cleanup_failed = 1;
+	}
+	if (rmdir(memcg_a)) {
+		perror("rmdir memcg A");
+		memcg_cleanup_failed = 1;
+	}
 }
 
 /* Child: dirty anon memory, report base, keep some pages warm forever. */
@@ -200,7 +280,10 @@ static void child_main(int wfd)
 	size_t len = child_mib << 20;
 	volatile char *p;
 	size_t i;
-
+	/* On v2, establish the charging cgroup before the first allocation. */
+	if (memcg_mode == MEMCG_V2 &&
+	    move_to_memcg(getpid(), memcg_a_procs))
+		_exit(2);
 
 	p = mmap(NULL, len, PROT_READ | PROT_WRITE,
 		 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -323,6 +406,7 @@ static void *race_thread(void *arg)
 int main(int argc, char **argv)
 {
 	struct child *kids;
+	char memory_current[PATH_MAX];
 	long it;
 	int opt, i, spawned = 0, rc = 0;
 
@@ -377,10 +461,24 @@ int main(int argc, char **argv)
 			goto out;
 		}
 	}
+	if (memcg_mode == MEMCG_V2) {
+		if (path_join(memory_current, sizeof(memory_current), memcg_a,
+			      "memory.current") ||
+		    read_ull(memory_current, &stat_memcg_initial_bytes) ||
+		    !stat_memcg_initial_bytes) {
+			errno = EIO;
+			perror("verify initial cgroup-v2 memory charge");
+			rc = 2;
+			goto out;
+		}
+	}
 
-	printf("START pid=%d iterations=%ld children=%d child_mib=%zu memcg=%s\n",
-	       getpid(), iterations, nchildren, child_mib,
-	       memcg_root ? memcg_root : "off");
+	printf("START pid=%d iterations=%ld children=%d child_mib=%zu",
+	       getpid(), iterations, nchildren, child_mib);
+	printf(" memcg=%s%s charged=%llu\n",
+	       memcg_mode == MEMCG_V1 ? "v1:" :
+	       memcg_mode == MEMCG_V2 ? "v2:" : "",
+	       memcg_root ? memcg_root : "off", stat_memcg_initial_bytes);
 	fflush(stdout);
 
 	srandom(getpid());
@@ -398,7 +496,8 @@ int main(int argc, char **argv)
 		 * so fork/COW races run continuously underneath.
 		 * Mode 5: child SIGKILLed mid-pageout (exit race).
 		 * Mode 6: child stopped/continued mid-pageout (freezer-ish).
-		 * Mode 7: migrate task and existing charges between memcgs.
+		 * Mode 7: migrate the task between memcgs. Cgroup v1 also
+		 * migrates existing charges; v2 deliberately leaves them in A.
 		 */
 		if (mode == 5 || mode == 6 || (mode == 7 && memcg_root)) {
 			ra.pid = c->pid;
@@ -478,7 +577,11 @@ out:
 		return 1;
 	}
 	if (memcg_root && !stat_memcg_ok) {
-		fprintf(stderr, "FAIL: no memcg charge migration succeeded\n");
+		fprintf(stderr, "FAIL: no memcg task migration succeeded\n");
+		return 1;
+	}
+	if (memcg_cleanup_failed) {
+		fprintf(stderr, "FAIL: test memory cgroups were not removed\n");
 		return 1;
 	}
 	printf("Now check dmesg/pstore via mm-diag-evidence.sh post <run>\n");
