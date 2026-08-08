@@ -34,6 +34,7 @@
 #include <linux/show_mem_notifier.h>
 #include <linux/sched.h>
 #include <linux/jiffies.h>
+#include <linux/vmstat.h>
 #include <trace/events/cma.h>
 
 #include "cma.h"
@@ -472,7 +473,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	if (!count)
 		return NULL;
 
-	trace_cma_alloc_start(count, align);
+	trace_cma_alloc_start(cma->name, count, align);
 
 	mask = cma_bitmap_aligned_mask(cma, align);
 	offset = cma_bitmap_aligned_offset(cma, align);
@@ -480,7 +481,7 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	bitmap_count = cma_bitmap_pages_to_bits(cma, count);
 
 	if (bitmap_count > bitmap_maxno)
-		return NULL;
+		goto out;
 
 	for (;;) {
 		mutex_lock(&cma->lock);
@@ -536,12 +537,14 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 		pr_debug("%s(): memory range at %p is busy, retrying\n",
 			 __func__, pfn_to_page(pfn));
 
-		trace_cma_alloc_busy_retry(pfn, pfn_to_page(pfn), count, align);
+		trace_cma_alloc_busy_retry(cma->name, pfn, pfn_to_page(pfn),
+					   count, align);
 		/* try again with a bit different memory target */
 		start = bitmap_no + mask + 1;
 	}
 
-	trace_cma_alloc(pfn, page, count, align);
+out:
+	trace_cma_alloc_finish(cma->name, pfn, page, count, align, ret);
 
 	/*
 	 * CMA can allocate multiple page blocks, which results in different
@@ -554,9 +557,17 @@ struct page *cma_alloc(struct cma *cma, size_t count, unsigned int align,
 	}
 
 	if (ret && !no_warn) {
-		pr_err("%s: %s: alloc failed, req-size: %zu pages, ret: %d\n",
-			__func__, cma->name, count, ret);
+		pr_err_ratelimited("%s: %s: alloc failed, req-size: %zu pages, ret: %d\n",
+				   __func__, cma->name, count, ret);
 		cma_debug_show_areas(cma);
+	}
+
+	if (page) {
+		count_vm_event(CMA_ALLOC_SUCCESS);
+		cma_sysfs_account_success_pages(cma, count);
+	} else {
+		count_vm_event(CMA_ALLOC_FAIL);
+		cma_sysfs_account_fail_pages(cma, count);
 	}
 
 	pr_debug("%s(): returned %p\n", __func__, page);
@@ -592,7 +603,8 @@ bool cma_release(struct cma *cma, const struct page *pages, unsigned int count)
 
 	free_contig_range(pfn, count);
 	cma_clear_bitmap(cma, pfn, count);
-	trace_cma_release(pfn, pages, count);
+	cma_sysfs_account_release_pages(cma, count);
+	trace_cma_release(cma->name, pfn, pages, count);
 
 	return true;
 }

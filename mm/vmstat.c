@@ -1260,6 +1260,10 @@ const char * const vmstat_text[] = {
 	"compact_daemon_migrate_scanned",
 	"compact_daemon_free_scanned",
 #endif
+#ifdef CONFIG_CMA
+	"cma_alloc_success",
+	"cma_alloc_fail",
+#endif
 
 #ifdef CONFIG_HUGETLB_PAGE
 	"htlb_buddy_alloc_success",

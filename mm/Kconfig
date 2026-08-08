@@ -535,6 +535,16 @@ config CMA_DEBUGFS
 	help
 	  Turns on the DebugFS interface for CMA.
 
+config CMA_SYSFS
+	bool "CMA information through sysfs interface"
+	depends on CMA && SYSFS
+	help
+	  Expose per-area successful, failed, and released CMA page counters
+	  under /sys/kernel/mm/cma. Unlike debugfs, this read-only interface
+	  is suitable for production diagnostics and cannot allocate memory.
+	  The counters make large contiguous-allocation failures attributable
+	  without enabling the writable CMA debugfs test interface.
+
 config  CMA_ALLOW_WRITE_DEBUGFS
 	depends on CMA_DEBUGFS
 	bool "Allow CMA debugfs write"
