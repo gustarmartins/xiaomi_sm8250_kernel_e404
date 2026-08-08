@@ -3940,13 +3940,10 @@ static bool age_lruvec(struct lruvec *lruvec, struct scan_control *sc,
 	return true;
 }
 
-/* to protect the working set of the last N jiffies */
 /*
- * Default 0 (disabled): a non-zero min_ttl makes MGLRU invoke the kernel OOM
- * killer whenever the whole working set is younger than min_ttl, which during
- * an app-launch burst is always true -> OOM-kill storm despite free zram swap,
- * and that storm exposed the lru_gen_look_around() NULL-deref panic (2026-06).
- * Let lmkd (PSI) handle pressure; keep the kernel backstop off.
+ * Protect the working set of the last N jiffies.  Keep the default disabled;
+ * unlike the donor implementation, a configured TTL is best-effort here and
+ * falls back to ordinary aging instead of invoking a TTL-specific kernel OOM.
  */
 static unsigned long lru_gen_min_ttl __read_mostly;
 static int lru_gen_min_ttl_unsatisfied;
@@ -3989,25 +3986,28 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 
 	current->reclaim_state->mm_walk = NULL;
 
-	/* TTL zero disables MGLRU's OOM relief valve entirely. */
+	/* TTL zero keeps ordinary MGLRU aging unchanged. */
 	if (success || !min_ttl || sc->order)
 		return;
 
 	/*
-	 * The main goal is to OOM kill if every generation from all memcgs is
-	 * younger than min_ttl. However, another theoretical possibility is all
-	 * memcgs are either below min or empty.
+	 * The donor implementation invokes the OOM killer when every generation
+	 * is younger than min_ttl.  That is too strong for this 4.19 Android
+	 * backport: a Camera allocation burst can temporarily make the complete
+	 * working set young while order-0 runway is already depleted.  Preserve
+	 * TTL when it is satisfiable, but fail open to ordinary aging for this
+	 * cycle rather than converting reclaim latency directly into an OOM.
 	 */
-	pr_err("mglru: min_ttl unsatisfied, calling OOM killer\n");
 	lru_gen_min_ttl_unsatisfied++;
-	if (mutex_trylock(&oom_lock)) {
-		struct oom_control oc = {
-			.gfp_mask = sc->gfp_mask,
-			.order = sc->order,
-		};
-		out_of_memory(&oc);
-		mutex_unlock(&oom_lock);
-	}
+	pr_warn_ratelimited("mglru: min_ttl unsatisfied, bypassing TTL for this aging cycle\n");
+
+	memcg = mem_cgroup_iter(NULL, NULL, NULL);
+	do {
+		struct lruvec *lruvec = mem_cgroup_lruvec(pgdat, memcg);
+
+		age_lruvec(lruvec, sc, 0);
+		cond_resched();
+	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
 }
 
 /*
@@ -6110,17 +6110,25 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 	BUILD_BUG_ON(MAX_NR_ZONES > S8_MAX);
 
 	/*
-	 * Do not enter reclaim if fatal signal was delivered while throttled.
-	 * 1 is returned so that the page allocator does not OOM kill at this
-	 * point.
+	 * Trace the complete caller-visible stall, including the reserve throttle
+	 * which used to happen before the begin event.  Without this placement a
+	 * task could wait in throttle_direct_reclaim() for seconds while tracing
+	 * incorrectly reported no direct reclaim at all.
 	 */
-	if (throttle_direct_reclaim(sc.gfp_mask, zonelist, nodemask))
-		return 1;
-
 	trace_mm_vmscan_direct_reclaim_begin(order,
 				sc.may_writepage,
 				sc.gfp_mask,
 				sc.reclaim_idx);
+
+	/*
+	 * Do not enter reclaim if fatal signal was delivered while throttled.
+	 * 1 is returned so that the page allocator does not OOM kill at this
+	 * point.  Trace zero reclaimed pages because no scan was performed.
+	 */
+	if (throttle_direct_reclaim(sc.gfp_mask, zonelist, nodemask)) {
+		trace_mm_vmscan_direct_reclaim_end(0);
+		return 1;
+	}
 
 	nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
 
