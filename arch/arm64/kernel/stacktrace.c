@@ -23,6 +23,7 @@
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
+#include <linux/uaccess.h>
 
 #include <asm/irq.h>
 #include <asm/stack_pointer.h>
@@ -193,4 +194,69 @@ void save_stack_trace(struct stack_trace *trace)
 }
 
 EXPORT_SYMBOL_GPL(save_stack_trace);
+#endif
+
+#ifdef CONFIG_USER_STACKTRACE_SUPPORT
+struct stack_frame_user {
+	const void __user *next_fp;
+	unsigned long lr;
+};
+
+static int copy_stack_frame_user(const void __user *fp,
+				 struct stack_frame_user *frame)
+{
+	int ret;
+
+	if (!access_ok(VERIFY_READ, fp, sizeof(*frame)))
+		return 0;
+
+	ret = 1;
+	pagefault_disable();
+	if (__copy_from_user_inatomic(frame, fp, sizeof(*frame)))
+		ret = 0;
+	pagefault_enable();
+
+	return ret;
+}
+
+static inline void __save_stack_trace_user(struct stack_trace *trace)
+{
+	const struct pt_regs *regs = task_pt_regs(current);
+	const void __user *fp = (const void __user *)regs->regs[29];
+
+	if (trace->nr_entries < trace->max_entries)
+		trace->entries[trace->nr_entries++] = regs->pc;
+
+	while (trace->nr_entries < trace->max_entries) {
+		struct stack_frame_user frame;
+		unsigned long fp_addr = (unsigned long)fp;
+		unsigned long next_fp;
+
+		if (fp_addr < regs->sp || !IS_ALIGNED(fp_addr, 16))
+			break;
+
+		frame.next_fp = NULL;
+		frame.lr = 0;
+		if (!copy_stack_frame_user(fp, &frame))
+			break;
+		if (!frame.lr)
+			break;
+
+		trace->entries[trace->nr_entries++] = frame.lr;
+		next_fp = (unsigned long)frame.next_fp;
+		if (next_fp <= fp_addr || !IS_ALIGNED(next_fp, 16))
+			break;
+		fp = frame.next_fp;
+	}
+}
+
+void save_stack_trace_user(struct stack_trace *trace)
+{
+	if (current->mm)
+		__save_stack_trace_user(trace);
+
+	if (trace->nr_entries < trace->max_entries)
+		trace->entries[trace->nr_entries++] = ULONG_MAX;
+}
+EXPORT_SYMBOL_GPL(save_stack_trace_user);
 #endif
