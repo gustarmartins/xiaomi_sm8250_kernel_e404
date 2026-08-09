@@ -196,7 +196,7 @@ ifdef CONFIG_SND_SOC_WCD_MBHC_LEGACY
 	MBHC_OBJS += wcd-mbhc-legacy.o
 endif
 
-ifdef CONFIG_SND_SOC_HDMI_CODEC
+ifdef CONFIG_MSM_EXT_DISPLAY
 	HDMICODEC_OBJS += msm_hdmi_codec_rx.o
 endif
 
@@ -292,5 +292,5 @@ wcd_spi_dlkm-y := $(SPI_OBJS)
 obj-$(CONFIG_SND_SOC_WCD_MBHC) += mbhc_dlkm.o
 mbhc_dlkm-y := $(MBHC_OBJS)
 
-obj-$(CONFIG_SND_SOC_HDMI_CODEC) += hdmi_dlkm.o
+obj-$(CONFIG_MSM_EXT_DISPLAY) += hdmi_dlkm.o
 hdmi_dlkm-y := $(HDMICODEC_OBJS)
