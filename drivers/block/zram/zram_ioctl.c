@@ -26,6 +26,7 @@
 struct zram_process_walk_private {
 	struct zram *zram;
 	struct zram_pp_ctl *pp_ctl;
+	unsigned int cmd;
 	u64 nr_remaining_pages;
 	unsigned long next_addr;
 	bool stopped;
@@ -111,13 +112,18 @@ static int zram_process_walker(pmd_t *pmd, unsigned long start,
 		if (index >= nr_pages)
 			goto put_entry;
 
-		ret = zram_scan_slot_for_writeback(zram, index,
-						   private->pp_ctl);
+		if (private->cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
+			ret = zram_scan_slot_for_writeback(zram, index,
+							   private->pp_ctl);
+		else
+			ret = zram_scan_slot_for_prefetch(zram, index,
+							  private->pp_ctl);
 		if (ret && ret != -ERANGE) {
 			swap_free(entry);
 			return ret;
 		}
-		if (private->nr_remaining_pages != NR_PAGES_UNLIMITED)
+		if (private->cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK &&
+		    private->nr_remaining_pages != NR_PAGES_UNLIMITED)
 			private->nr_remaining_pages--;
 put_entry:
 		swap_free(entry);
@@ -131,13 +137,14 @@ static const struct mm_walk_ops zram_walk_ops = {
 	.pmd_entry = zram_process_walker,
 };
 
-static int zram_ioctl_process_scan(struct zram *zram,
-		struct zram_android_ioc_process_range_writeback *range,
+static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
+		u64 pidfd, struct zram_android_ioc_process_range_writeback *range,
 		struct zram_pp_ctl *pp_ctl)
 {
 	struct zram_process_walk_private private = {
 		.zram = zram,
 		.pp_ctl = pp_ctl,
+		.cmd = cmd,
 		.nr_remaining_pages = NR_PAGES_UNLIMITED,
 	};
 	struct task_struct *task;
@@ -146,14 +153,19 @@ static int zram_ioctl_process_scan(struct zram *zram,
 	unsigned long start_addr;
 	int ret = 0;
 
-	if (range->pidfd > UINT_MAX || range->start_addr > ULONG_MAX)
+	if (pidfd > UINT_MAX)
 		return -EINVAL;
-	start_addr = range->start_addr;
-	if (range->size)
+	start_addr = 0;
+	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK &&
+	    range->start_addr > ULONG_MAX)
+		return -EINVAL;
+	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
+		start_addr = range->start_addr;
+	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK && range->size)
 		private.nr_remaining_pages =
 			DIV_ROUND_UP_ULL(range->size, PAGE_SIZE);
 
-	task = zram_pidfd_get_task(range->pidfd);
+	task = zram_pidfd_get_task(pidfd);
 	if (IS_ERR(task))
 		return PTR_ERR(task);
 	mm = get_task_mm(task);
@@ -185,7 +197,8 @@ static int zram_ioctl_process_scan(struct zram *zram,
 	}
 	up_read(&mm->mmap_sem);
 
-	range->next_addr = private.stopped ? private.next_addr : 0;
+	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
+		range->next_addr = private.stopped ? private.next_addr : 0;
 put_mm:
 	mmput(mm);
 	return ret;
@@ -226,13 +239,58 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 		goto clear_progress;
 	}
 
-	ret = zram_ioctl_process_scan(zram, range, pp_ctl);
+	ret = zram_ioctl_process_scan(zram,
+				      ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK,
+				      range->pidfd, range, pp_ctl);
 	if (!ret)
 		ret = zram_writeback_slots(zram, pp_ctl, wb_ctl);
 	range->written_bytes = zram_wb_processed_bytes(wb_ctl);
 
 clear_progress:
 	zram_wb_ctl_free(wb_ctl);
+	zram_pp_ctl_free(zram, pp_ctl);
+	atomic_set(&zram->pp_in_progress, 0);
+unlock:
+	up_read(&zram->init_lock);
+	return ret;
+}
+
+static int zram_ioctl_process_prefetch(struct zram *zram,
+		struct zram_android_ioc_process_prefetch *prefetch)
+{
+	struct zram_pp_ctl *pp_ctl = NULL;
+	int ret;
+
+	if (!capable(CAP_SYS_NICE))
+		return -EPERM;
+
+	down_read(&zram->init_lock);
+	if (!zram->disksize) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+	if (!zram->backing_dev) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	/* Keep reset, writeback and recompression out until every bio finishes. */
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+
+	pp_ctl = zram_pp_ctl_alloc();
+	if (!pp_ctl) {
+		ret = -ENOMEM;
+		goto clear_progress;
+	}
+
+	ret = zram_ioctl_process_scan(zram, ZRAM_ANDROID_IOC_PROCESS_PREFETCH,
+				      prefetch->pidfd, NULL, pp_ctl);
+	if (!ret)
+		ret = zram_prefetch_slots(zram, pp_ctl);
+
+clear_progress:
 	zram_pp_ctl_free(zram, pp_ctl);
 	atomic_set(&zram->pp_in_progress, 0);
 unlock:
@@ -260,6 +318,12 @@ int zram_ioctl(struct block_device *bdev, fmode_t mode,
 		ret = zram_ioctl_process_writeback(zram, &range);
 		if (copy_to_user(argp, &range, sizeof(range)))
 			ret = -EFAULT;
+	} else if (cmd == ZRAM_ANDROID_IOC_PROCESS_PREFETCH) {
+		struct zram_android_ioc_process_prefetch prefetch;
+
+		if (copy_from_user(&prefetch, argp, sizeof(prefetch)))
+			return -EFAULT;
+		ret = zram_ioctl_process_prefetch(zram, &prefetch);
 	} else if (cmd == ZRAM_ANDROID_IOC_PROCESS_WRITEBACK) {
 		struct zram_android_ioc_process_range_writeback range = { 0 };
 		struct zram_android_ioc_data legacy;
