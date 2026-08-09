@@ -2239,7 +2239,9 @@ static void zram_free_page(struct zram *zram, size_t index)
 	zram->table[index].ac_time = 0;
 #endif
 	/* A prefetched slot owns both its zspool object and cached bdev block. */
-	zram_prefetch_cache_drop(zram, index);
+	if (zram_allocated(zram, index) &&
+	    zram_prefetch_cache_exists(zram, index))
+		zram_prefetch_cache_drop(zram, index);
 
 	zram_clear_flag(zram, index, ZRAM_IDLE);
 	zram_clear_flag(zram, index, ZRAM_INCOMPRESSIBLE);
