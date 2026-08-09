@@ -66,6 +66,10 @@ config ARM64
 	select ARCH_SUPPORTS_NUMA_BALANCING
 	select ARCH_WANT_COMPAT_IPC_PARSE_VERSION
 	select ARCH_WANT_DEFAULT_BPF_JIT
+	# Keep production builds lean, but make STACKTRACE/FTRACE diagnostic
+	# kernels unwindable.  Without frame pointers, tracefs stacktrace triggers
+	# emit empty callchains on this 4.19 arm64 tree.
+	select ARCH_WANT_FRAME_POINTERS if DEBUG_KERNEL
 	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select ARM_AMBA
 	select ARM_ARCH_TIMER
