@@ -491,6 +491,8 @@ out:
 }
 
 #ifdef CONFIG_ZRAM_WRITEBACK
+#define INVALID_BDEV_BLOCK (~0UL)
+
 struct zram_wb_ctl {
 	/* Only the initiating writeback task accesses idle_reqs. */
 	struct list_head idle_reqs;
@@ -520,6 +522,9 @@ static ssize_t writeback_limit_enable_store(struct device *dev,
 
 	if (kstrtoull(buf, 10, &val))
 		return ret;
+
+	/* writeback_limit is expressed in 4-KiB units. */
+	val = rounddown(val, PAGE_SIZE / 4096);
 
 	down_write(&zram->init_lock);
 	zram->wb_limit_enable = val;
@@ -747,15 +752,13 @@ out:
 
 static unsigned long alloc_block_bdev(struct zram *zram)
 {
-	unsigned long blk_idx = 1;
-retry:
-	/* skip 0 bit to confuse zram.handle = 0 */
-	blk_idx = find_next_zero_bit(zram->bitmap, zram->nr_pages, blk_idx);
-	if (blk_idx == zram->nr_pages)
-		return 0;
+	unsigned long blk_idx;
 
-	if (test_and_set_bit(blk_idx, zram->bitmap))
-		goto retry;
+	blk_idx = find_next_zero_bit(zram->bitmap, zram->nr_pages, 0);
+	if (blk_idx == zram->nr_pages)
+		return INVALID_BDEV_BLOCK;
+
+	set_bit(blk_idx, zram->bitmap);
 
 	atomic64_inc(&zram->stats.bd_count);
 	return blk_idx;
@@ -1016,7 +1019,7 @@ static ssize_t writeback_store(struct device *dev,
 	unsigned long index = 0;
 	ssize_t ret = len;
 	int mode, err = 0;
-	unsigned long blk_idx = 0;
+	unsigned long blk_idx = INVALID_BDEV_BLOCK;
 
 	if (sysfs_streq(buf, "idle"))
 		mode = IDLE_WRITEBACK;
@@ -1087,9 +1090,9 @@ static ssize_t writeback_store(struct device *dev,
 				ret = err;
 		}
 
-		if (!blk_idx) {
+		if (blk_idx == INVALID_BDEV_BLOCK) {
 			blk_idx = alloc_block_bdev(zram);
-			if (!blk_idx) {
+			if (blk_idx == INVALID_BDEV_BLOCK) {
 				ret = -ENOSPC;
 				break;
 			}
@@ -1119,7 +1122,7 @@ static ssize_t writeback_store(struct device *dev,
 		req->bio.bi_end_io = zram_writeback_endio;
 		__bio_add_page(&req->bio, req->page, PAGE_SIZE, 0);
 		zram_submit_wb_request(zram, wb_ctl, req);
-		blk_idx = 0;
+		blk_idx = INVALID_BDEV_BLOCK;
 		req = NULL;
 		cond_resched();
 		continue;
@@ -1130,7 +1133,7 @@ next:
 
 	if (req)
 		release_wb_req(req);
-	if (blk_idx)
+	if (blk_idx != INVALID_BDEV_BLOCK)
 		free_block_bdev(zram, blk_idx);
 
 	while (atomic_read(&wb_ctl->num_inflight) > 0) {
@@ -1862,14 +1865,14 @@ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 		ret = zram_read_from_zspool(zram, page, index);
 		zram_slot_unlock(zram, index);
 	} else {
+		unsigned long blk_idx = zram_get_handle(zram, index);
+
 		/*
 		 * The slot should be unlocked before reading from the backing
 		 * device.
 		 */
 		zram_slot_unlock(zram, index);
-
-		ret = read_from_bdev(zram, page, zram_get_handle(zram, index),
-				     parent);
+		ret = read_from_bdev(zram, page, blk_idx, parent);
 	}
 
 	/* Should NEVER happen. Return bio error if it does. */
