@@ -36,6 +36,7 @@
 
 #include "kcompressd.h"
 #include "zram_drv.h"
+#include "zram_ioctl.h"
 
 static DEFINE_IDR(zram_index_idr);
 /* idr index must be protected */
@@ -2950,6 +2951,7 @@ static int zram_open(struct block_device *bdev, fmode_t mode)
 
 static const struct block_device_operations zram_devops = {
 	.open = zram_open,
+	.ioctl = zram_ioctl,
 	.swap_slot_free_notify = zram_slot_free_notify,
 	.owner = THIS_MODULE
 };

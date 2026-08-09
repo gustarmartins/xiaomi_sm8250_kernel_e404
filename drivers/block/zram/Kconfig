@@ -143,6 +143,13 @@ config ZRAM_MULTI_COMP
 	  compression algorithm. Note, that IDLE page recompression
 	  requires ZRAM_MEMORY_TRACKING.
 
+config ZRAM_ANDROID_IOCTL
+	bool "Android per-process zram operations"
+	depends on ZRAM_WRITEBACK
+	help
+	  Expose the versioned Android zram ioctl ABI used for pidfd-targeted
+	  process writeback and prefetch. The operations require CAP_SYS_NICE.
+
 config KCOMPRESSD
 	tristate "Kcompressd: Accelerated zram compression"
 	depends on ZRAM
