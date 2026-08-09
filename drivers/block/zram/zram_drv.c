@@ -245,7 +245,7 @@ struct zram_pp_ctl {
 	struct list_head	pp_buckets[NUM_PP_BUCKETS];
 };
 
-static struct zram_pp_ctl *init_pp_ctl(void)
+struct zram_pp_ctl *zram_pp_ctl_alloc(void)
 {
 	struct zram_pp_ctl *ctl;
 	u32 idx;
@@ -270,7 +270,7 @@ static void release_pp_slot(struct zram *zram, struct zram_pp_slot *pps)
 	kfree(pps);
 }
 
-static void release_pp_ctl(struct zram *zram, struct zram_pp_ctl *ctl)
+void zram_pp_ctl_free(struct zram *zram, struct zram_pp_ctl *ctl)
 {
 	u32 idx;
 
@@ -905,7 +905,7 @@ static void release_wb_req(struct zram_wb_req *req)
 	kfree(req);
 }
 
-static void release_wb_ctl(struct zram_wb_ctl *wb_ctl)
+void zram_wb_ctl_free(struct zram_wb_ctl *wb_ctl)
 {
 	if (!wb_ctl)
 		return;
@@ -926,7 +926,7 @@ static void release_wb_ctl(struct zram_wb_ctl *wb_ctl)
 	kfree_rcu(wb_ctl, rcu);
 }
 
-static struct zram_wb_ctl *init_wb_ctl(struct zram *zram)
+struct zram_wb_ctl *zram_wb_ctl_alloc(struct zram *zram)
 {
 	struct zram_wb_ctl *wb_ctl;
 	int i;
@@ -959,7 +959,7 @@ static struct zram_wb_ctl *init_wb_ctl(struct zram *zram)
 	}
 
 	if (list_empty(&wb_ctl->idle_reqs)) {
-		release_wb_ctl(wb_ctl);
+		zram_wb_ctl_free(wb_ctl);
 		return NULL;
 	}
 
@@ -1146,9 +1146,21 @@ next:
 	return 0;
 }
 
-static int zram_writeback_slots(struct zram *zram,
-				struct zram_pp_ctl *pp_ctl,
-				struct zram_wb_ctl *wb_ctl)
+int zram_scan_slot_for_writeback(struct zram *zram, unsigned long index,
+				 struct zram_pp_ctl *ctl)
+{
+	if (index >= (zram->disksize >> PAGE_SHIFT))
+		return -ERANGE;
+	return scan_slots_for_writeback(zram, PAGE_WRITEBACK, 1, index, ctl);
+}
+
+u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl)
+{
+	return ctl->processed_bytes;
+}
+
+int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
+			 struct zram_wb_ctl *wb_ctl)
 {
 	struct zram_wb_req *req = NULL;
 	struct zram_pp_slot *pps;
@@ -1279,13 +1291,13 @@ static ssize_t writeback_store(struct device *dev,
 		goto release_init_lock;
 	}
 
-	pp_ctl = init_pp_ctl();
+	pp_ctl = zram_pp_ctl_alloc();
 	if (!pp_ctl) {
 		ret = -ENOMEM;
 		goto release_init_lock;
 	}
 
-	wb_ctl = init_wb_ctl(zram);
+	wb_ctl = zram_wb_ctl_alloc(zram);
 	if (!wb_ctl) {
 		ret = -ENOMEM;
 		goto release_init_lock;
@@ -1297,8 +1309,8 @@ static ssize_t writeback_store(struct device *dev,
 		ret = err;
 
 release_init_lock:
-	release_pp_ctl(zram, pp_ctl);
-	release_wb_ctl(wb_ctl);
+	zram_pp_ctl_free(zram, pp_ctl);
+	zram_wb_ctl_free(wb_ctl);
 	atomic_set(&zram->pp_in_progress, 0);
 	up_read(&zram->init_lock);
 
@@ -2582,7 +2594,7 @@ static ssize_t recompress_store(struct device *dev,
 		goto release_init_lock;
 	}
 
-	ctl = init_pp_ctl();
+	ctl = zram_pp_ctl_alloc();
 	if (!ctl) {
 		ret = -ENOMEM;
 		goto release_init_lock;
@@ -2619,7 +2631,7 @@ next:
 release_init_lock:
 	if (page)
 		__free_page(page);
-	release_pp_ctl(zram, ctl);
+	zram_pp_ctl_free(zram, ctl);
 	atomic_set(&zram->pp_in_progress, 0);
 	up_read(&zram->init_lock);
 	return ret;

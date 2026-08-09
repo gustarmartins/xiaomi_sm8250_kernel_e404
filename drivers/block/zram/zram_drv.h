@@ -140,4 +140,17 @@ struct zram {
 #endif
 	atomic_t pp_in_progress;
 };
+
+struct zram_pp_ctl;
+struct zram_wb_ctl;
+
+struct zram_pp_ctl *zram_pp_ctl_alloc(void);
+void zram_pp_ctl_free(struct zram *zram, struct zram_pp_ctl *ctl);
+struct zram_wb_ctl *zram_wb_ctl_alloc(struct zram *zram);
+void zram_wb_ctl_free(struct zram_wb_ctl *ctl);
+int zram_scan_slot_for_writeback(struct zram *zram, unsigned long index,
+				 struct zram_pp_ctl *ctl);
+int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
+			 struct zram_wb_ctl *wb_ctl);
+u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl);
 #endif
