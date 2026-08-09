@@ -506,6 +506,7 @@ struct zram_wb_ctl {
 	spinlock_t done_lock;
 	atomic_t num_inflight;
 	struct rcu_head rcu;
+	u64 processed_bytes;
 };
 
 struct zram_wb_req {
@@ -936,6 +937,7 @@ static struct zram_wb_ctl *init_wb_ctl(struct zram *zram)
 	INIT_LIST_HEAD(&wb_ctl->idle_reqs);
 	INIT_LIST_HEAD(&wb_ctl->done_reqs);
 	atomic_set(&wb_ctl->num_inflight, 0);
+	wb_ctl->processed_bytes = 0;
 	init_waitqueue_head(&wb_ctl->done_wait);
 	spin_lock_init(&wb_ctl->done_lock);
 
@@ -1077,6 +1079,8 @@ static int zram_complete_done_reqs(struct zram *zram,
 		err = zram_writeback_complete(zram, req);
 		if (err)
 			ret = err;
+		else
+			wb_ctl->processed_bytes += PAGE_SIZE;
 
 		atomic_dec(&wb_ctl->num_inflight);
 		release_pp_slot(zram, req->pps);
@@ -1141,6 +1145,91 @@ next:
 	return 0;
 }
 
+static int zram_writeback_slots(struct zram *zram,
+				struct zram_pp_ctl *pp_ctl,
+				struct zram_wb_ctl *wb_ctl)
+{
+	struct zram_wb_req *req = NULL;
+	struct zram_pp_slot *pps;
+	unsigned long blk_idx = INVALID_BDEV_BLOCK;
+	u32 index = 0;
+	int ret = 0, err = 0;
+
+	while ((pps = select_pp_slot(pp_ctl))) {
+		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
+			ret = -EIO;
+			break;
+		}
+
+		while (!req) {
+			req = zram_select_idle_req(wb_ctl);
+			if (req)
+				break;
+
+			wait_event(wb_ctl->done_wait,
+				   !list_empty(&wb_ctl->done_reqs));
+			err = zram_complete_done_reqs(zram, wb_ctl);
+			if (err)
+				ret = err;
+		}
+
+		if (blk_idx == INVALID_BDEV_BLOCK) {
+			blk_idx = alloc_block_bdev(zram);
+			if (blk_idx == INVALID_BDEV_BLOCK) {
+				ret = -ENOSPC;
+				break;
+			}
+		}
+
+		index = pps->index;
+		zram_slot_lock(zram, index);
+		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT))
+			goto next;
+
+		if (zram->compressed_wb)
+			err = zram_read_from_zspool_raw(zram, req->page,
+						 index);
+		else
+			err = zram_read_from_zspool(zram, req->page, index);
+		if (err)
+			goto next;
+		zram_slot_unlock(zram, index);
+
+		list_del_init(&pps->entry);
+		req->blk_idx = blk_idx;
+		req->pps = pps;
+		bio_init(&req->bio, &req->bio_vec, 1);
+		bio_set_dev(&req->bio, zram->bdev);
+		req->bio.bi_opf = REQ_OP_WRITE;
+		req->bio.bi_iter.bi_sector = blk_idx * (PAGE_SIZE >> 9);
+		req->bio.bi_end_io = zram_writeback_endio;
+		__bio_add_page(&req->bio, req->page, PAGE_SIZE, 0);
+		zram_submit_wb_request(zram, wb_ctl, req);
+		blk_idx = INVALID_BDEV_BLOCK;
+		req = NULL;
+		cond_resched();
+		continue;
+next:
+		zram_slot_unlock(zram, index);
+		release_pp_slot(zram, pps);
+	}
+
+	if (req)
+		release_wb_req(req);
+	if (blk_idx != INVALID_BDEV_BLOCK)
+		free_block_bdev(zram, blk_idx);
+
+	while (atomic_read(&wb_ctl->num_inflight) > 0) {
+		wait_event(wb_ctl->done_wait,
+			   !list_empty(&wb_ctl->done_reqs));
+		err = zram_complete_done_reqs(zram, wb_ctl);
+		if (err)
+			ret = err;
+	}
+
+	return ret;
+}
+
 static ssize_t writeback_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -1148,12 +1237,9 @@ static ssize_t writeback_store(struct device *dev,
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	struct zram_pp_ctl *pp_ctl = NULL;
 	struct zram_wb_ctl *wb_ctl = NULL;
-	struct zram_wb_req *req = NULL;
-	struct zram_pp_slot *pps;
 	unsigned long index = 0;
 	ssize_t ret = len;
-	int mode, err = 0;
-	unsigned long blk_idx = INVALID_BDEV_BLOCK;
+	int mode, err;
 
 	if (sysfs_streq(buf, "idle"))
 		mode = IDLE_WRITEBACK;
@@ -1205,83 +1291,9 @@ static ssize_t writeback_store(struct device *dev,
 	}
 
 	scan_slots_for_writeback(zram, mode, nr_pages, index, pp_ctl);
-
-	while ((pps = select_pp_slot(pp_ctl))) {
-		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
-			ret = -EIO;
-			break;
-		}
-
-		while (!req) {
-			req = zram_select_idle_req(wb_ctl);
-			if (req)
-				break;
-
-			wait_event(wb_ctl->done_wait,
-				   !list_empty(&wb_ctl->done_reqs));
-			err = zram_complete_done_reqs(zram, wb_ctl);
-			if (err)
-				ret = err;
-		}
-
-		if (blk_idx == INVALID_BDEV_BLOCK) {
-			blk_idx = alloc_block_bdev(zram);
-			if (blk_idx == INVALID_BDEV_BLOCK) {
-				ret = -ENOSPC;
-				break;
-			}
-		}
-
-		index = pps->index;
-		zram_slot_lock(zram, index);
-		/*
-		 * scan_slots() sets ZRAM_PP_SLOT and relases slot lock, so
-		 * slots can change in the meantime. If slots are accessed or
-		 * freed they lose ZRAM_PP_SLOT flag and hence we don't
-		 * post-process them.
-		 */
-		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT))
-			goto next;
-		if (zram->compressed_wb)
-			err = zram_read_from_zspool_raw(zram, req->page,
-						 index);
-		else
-			err = zram_read_from_zspool(zram, req->page, index);
-		if (err)
-			goto next;
-		zram_slot_unlock(zram, index);
-
-		list_del_init(&pps->entry);
-		req->blk_idx = blk_idx;
-		req->pps = pps;
-		bio_init(&req->bio, &req->bio_vec, 1);
-		bio_set_dev(&req->bio, zram->bdev);
-		req->bio.bi_opf = REQ_OP_WRITE;
-		req->bio.bi_iter.bi_sector = blk_idx * (PAGE_SIZE >> 9);
-		req->bio.bi_end_io = zram_writeback_endio;
-		__bio_add_page(&req->bio, req->page, PAGE_SIZE, 0);
-		zram_submit_wb_request(zram, wb_ctl, req);
-		blk_idx = INVALID_BDEV_BLOCK;
-		req = NULL;
-		cond_resched();
-		continue;
-next:
-		zram_slot_unlock(zram, index);
-		release_pp_slot(zram, pps);
-	}
-
-	if (req)
-		release_wb_req(req);
-	if (blk_idx != INVALID_BDEV_BLOCK)
-		free_block_bdev(zram, blk_idx);
-
-	while (atomic_read(&wb_ctl->num_inflight) > 0) {
-		wait_event(wb_ctl->done_wait,
-			   !list_empty(&wb_ctl->done_reqs));
-		err = zram_complete_done_reqs(zram, wb_ctl);
-		if (err)
-			ret = err;
-	}
+	err = zram_writeback_slots(zram, pp_ctl, wb_ctl);
+	if (err)
+		ret = err;
 
 release_init_lock:
 	release_pp_ctl(zram, pp_ctl);
