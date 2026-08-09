@@ -18,6 +18,10 @@
 #include <linux/rwsem.h>
 #include <linux/zsmalloc.h>
 
+#ifdef CONFIG_ZRAM_ANDROID_IOCTL
+#include <linux/xarray.h>
+#endif
+
 #include "zcomp.h"
 
 #define SECTORS_PER_PAGE_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
@@ -135,6 +139,10 @@ struct zram {
 	unsigned long *bitmap;
 	unsigned long nr_pages;
 #endif
+#ifdef CONFIG_ZRAM_ANDROID_IOCTL
+	/* Keeps prefetched backing blocks alive until their swap slot is freed. */
+	struct xarray prefetch_cache;
+#endif
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	struct dentry *debugfs_dir;
 #endif
@@ -150,7 +158,40 @@ struct zram_wb_ctl *zram_wb_ctl_alloc(struct zram *zram);
 void zram_wb_ctl_free(struct zram_wb_ctl *ctl);
 int zram_scan_slot_for_writeback(struct zram *zram, unsigned long index,
 				 struct zram_pp_ctl *ctl);
+int zram_scan_slot_for_prefetch(struct zram *zram, unsigned long index,
+				struct zram_pp_ctl *ctl);
 int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 			 struct zram_wb_ctl *wb_ctl);
+int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl);
 u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl);
+
+#ifdef CONFIG_ZRAM_ANDROID_IOCTL
+void zram_prefetch_cache_init(struct zram *zram);
+void zram_prefetch_cache_destroy(struct zram *zram);
+bool zram_prefetch_cache_exists(struct zram *zram, u32 index);
+int zram_prefetch_cache_store(struct zram *zram, u32 index,
+			      unsigned long blk_idx);
+int zram_prefetch_cache_reuse(struct zram *zram, u32 index);
+int zram_prefetch_cache_drop(struct zram *zram, u32 index);
+#else
+static inline void zram_prefetch_cache_init(struct zram *zram) { }
+static inline void zram_prefetch_cache_destroy(struct zram *zram) { }
+static inline bool zram_prefetch_cache_exists(struct zram *zram, u32 index)
+{
+	return false;
+}
+static inline int zram_prefetch_cache_store(struct zram *zram, u32 index,
+					    unsigned long blk_idx)
+{
+	return 0;
+}
+static inline int zram_prefetch_cache_reuse(struct zram *zram, u32 index)
+{
+	return -EOPNOTSUPP;
+}
+static inline int zram_prefetch_cache_drop(struct zram *zram, u32 index)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 #endif

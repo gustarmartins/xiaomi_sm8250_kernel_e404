@@ -826,6 +826,80 @@ static void free_block_bdev(struct zram *zram, unsigned long blk_idx)
 	atomic64_dec(&zram->stats.bd_count);
 }
 
+#ifdef CONFIG_ZRAM_ANDROID_IOCTL
+static int zram_prefetch_cache_pop(struct zram *zram, u32 index,
+				   unsigned long *blk_idx)
+{
+	void *value = xa_erase(&zram->prefetch_cache, index);
+
+	if (!xa_is_value(value))
+		return -ENOENT;
+	*blk_idx = xa_to_value(value);
+	return 0;
+}
+
+void zram_prefetch_cache_init(struct zram *zram)
+{
+	xa_init(&zram->prefetch_cache);
+}
+
+void zram_prefetch_cache_destroy(struct zram *zram)
+{
+	WARN_ON_ONCE(!xa_empty(&zram->prefetch_cache));
+	xa_destroy(&zram->prefetch_cache);
+}
+
+bool zram_prefetch_cache_exists(struct zram *zram, u32 index)
+{
+	return xa_load(&zram->prefetch_cache, index) != NULL;
+}
+
+/* Return one on insertion, zero when unsupported, or a negative errno. */
+int zram_prefetch_cache_store(struct zram *zram, u32 index,
+			      unsigned long blk_idx)
+{
+	void *old;
+
+	/* Never overwrite an existing entry and silently leak its block. */
+	old = xa_cmpxchg(&zram->prefetch_cache, index, NULL,
+			 xa_mk_value(blk_idx), GFP_NOIO | __GFP_NOWARN);
+	if (xa_is_err(old))
+		return xa_err(old);
+	return old ? -EEXIST : 1;
+}
+
+int zram_prefetch_cache_reuse(struct zram *zram, u32 index)
+{
+	unsigned long blk_idx;
+	int ret;
+
+	ret = zram_prefetch_cache_pop(zram, index, &blk_idx);
+	if (ret)
+		return ret;
+
+	zram_clear_flag(zram, index, ZRAM_IDLE);
+	if (zram_test_flag(zram, index, ZRAM_HUGE))
+		atomic64_dec(&zram->stats.huge_pages);
+	atomic64_sub(zram_get_obj_size(zram, index),
+		     &zram->stats.compr_data_size);
+	zs_free(zram->mem_pool, zram_get_handle(zram, index));
+	zram_set_handle(zram, index, blk_idx);
+	zram_set_flag(zram, index, ZRAM_WB);
+	return 0;
+}
+
+int zram_prefetch_cache_drop(struct zram *zram, u32 index)
+{
+	unsigned long blk_idx;
+	int ret;
+
+	ret = zram_prefetch_cache_pop(zram, index, &blk_idx);
+	if (!ret)
+		free_block_bdev(zram, blk_idx);
+	return ret;
+}
+#endif
+
 static void zram_deferred_decompress(struct work_struct *work)
 {
 	struct zram_rb_req *req = container_of(work, struct zram_rb_req,
@@ -1945,6 +2019,8 @@ static void zram_free_page(struct zram *zram, size_t index)
 #ifdef CONFIG_ZRAM_MEMORY_TRACKING
 	zram->table[index].ac_time = 0;
 #endif
+	/* A prefetched slot owns both its zspool object and cached bdev block. */
+	zram_prefetch_cache_drop(zram, index);
 
 	zram_clear_flag(zram, index, ZRAM_IDLE);
 	zram_clear_flag(zram, index, ZRAM_INCOMPRESSIBLE);
@@ -3045,6 +3121,7 @@ static int zram_add(void)
 	device_id = ret;
 
 	init_rwsem(&zram->init_lock);
+	zram_prefetch_cache_init(zram);
 #ifdef CONFIG_ZRAM_WRITEBACK
 	zram->wb_batch_size = 32;
 	zram->compressed_wb = false;
@@ -3176,6 +3253,7 @@ static int zram_remove(struct zram *zram)
 	zram_reset_device(zram);
 
 	put_disk(zram->disk);
+	zram_prefetch_cache_destroy(zram);
 	kfree(zram);
 	return 0;
 }
