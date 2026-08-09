@@ -22,6 +22,8 @@
 #include "zram_ioctl.h"
 
 #define NR_PAGES_UNLIMITED U64_MAX
+/* Bound mmap_sem read-side hold time on the old linked-VMA implementation. */
+#define ZRAM_WALK_BATCH_BYTES (16UL << 20)
 
 struct zram_process_walk_private {
 	struct zram *zram;
@@ -150,7 +152,7 @@ static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
 	struct task_struct *task;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
-	unsigned long start_addr;
+	unsigned long cursor, start_addr;
 	int ret = 0;
 
 	if (pidfd > UINT_MAX)
@@ -178,24 +180,45 @@ static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
 		goto put_mm;
 	}
 
-	down_read(&mm->mmap_sem);
-	for (vma = find_vma(mm, start_addr); vma; vma = vma->vm_next) {
-		unsigned long start = max(vma->vm_start, start_addr);
+	/*
+	 * Maple Tree/per-VMA locking is not available on this 4.19 tree.  Re-find
+	 * the VMA for every bounded chunk so munmap/exit can make progress between
+	 * chunks without retaining a stale linked-list VMA pointer.
+	 */
+	for (cursor = start_addr; cursor < mm->task_size; ) {
+		unsigned long end, start;
+
+		down_read(&mm->mmap_sem);
+		vma = find_vma(mm, cursor);
+		if (!vma) {
+			up_read(&mm->mmap_sem);
+			break;
+		}
+
+		start = max(vma->vm_start, cursor);
+		end = start + ZRAM_WALK_BATCH_BYTES;
+		if (end < start || end > vma->vm_end)
+			end = vma->vm_end;
 
 		if (!vma_is_anonymous(vma) &&
-		    (!can_do_file_pageout(vma) && (vma->vm_flags & VM_MAYSHARE)))
+		    (!can_do_file_pageout(vma) && (vma->vm_flags & VM_MAYSHARE))) {
+			cursor = vma->vm_end;
+			up_read(&mm->mmap_sem);
+			cond_resched();
 			continue;
+		}
 
-		ret = walk_page_range(mm, start, vma->vm_end, &zram_walk_ops,
-				      &private);
+		ret = walk_page_range(mm, start, end, &zram_walk_ops, &private);
+		cursor = end;
+		up_read(&mm->mmap_sem);
 		if (private.stopped) {
 			ret = 0;
 			break;
 		}
 		if (ret)
 			break;
+		cond_resched();
 	}
-	up_read(&mm->mmap_sem);
 
 	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
 		range->next_addr = private.stopped ? private.next_addr : 0;
