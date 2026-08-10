@@ -2546,7 +2546,9 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
  * due to various back-off conditions, such as, contention on per-node or
  * per-zone locks.
  */
-static void proactive_compact_node(pg_data_t *pgdat)
+static void proactive_compact_node(pg_data_t *pgdat,
+				   unsigned long *migrate_scanned,
+				   unsigned long *free_scanned)
 {
 	int zoneid;
 	struct zone *zone;
@@ -2567,6 +2569,8 @@ static void proactive_compact_node(pg_data_t *pgdat)
 		cc.zone = zone;
 
 		compact_zone(&cc, NULL);
+		*migrate_scanned += cc.total_migrate_scanned;
+		*free_scanned += cc.total_free_scanned;
 
 		VM_BUG_ON(!list_empty(&cc.freepages));
 		VM_BUG_ON(!list_empty(&cc.migratepages));
@@ -2840,21 +2844,36 @@ static int kcompactd(void *p)
 
 		/* kcompactd wait timeout */
 		if (should_proactive_compact_node(pgdat)) {
+			int nid = pgdat->node_id;
 			unsigned int prev_score, score;
+			unsigned long migrate_scanned = 0;
+			unsigned long free_scanned = 0;
 
 			if (proactive_defer) {
 				proactive_defer--;
 				continue;
 			}
 			prev_score = fragmentation_score_node(pgdat);
-			proactive_compact_node(pgdat);
+			proactive_compact_node(pgdat, &migrate_scanned,
+					       &free_scanned);
 			score = fragmentation_score_node(pgdat);
+			count_compact_event(KCOMPACTD_PROACTIVE);
+			count_compact_events(KCOMPACTD_PROACTIVE_MIGRATE,
+					     migrate_scanned);
+			count_compact_events(KCOMPACTD_PROACTIVE_FREE,
+					     free_scanned);
+			if (score < prev_score)
+				count_compact_event(KCOMPACTD_PROACTIVE_OK);
 			/*
 			 * Defer proactive compaction if the fragmentation
 			 * score did not go down i.e. no progress made.
 			 */
 			proactive_defer = score < prev_score ?
 					0 : 1 << COMPACT_MAX_DEFER_SHIFT;
+			trace_mm_compaction_proactive(nid, prev_score, score,
+						      migrate_scanned,
+						      free_scanned,
+						      proactive_defer);
 		}
 	}
 

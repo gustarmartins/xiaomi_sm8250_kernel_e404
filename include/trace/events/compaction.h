@@ -353,6 +353,42 @@ DEFINE_EVENT(kcompactd_wake_template, mm_compaction_kcompactd_wake,
 	TP_ARGS(nid, order, classzone_idx)
 );
 
+TRACE_EVENT(mm_compaction_proactive,
+
+	TP_PROTO(int nid, unsigned int score_before, unsigned int score_after,
+		 unsigned long migrate_scanned, unsigned long free_scanned,
+		 unsigned int defer),
+
+	TP_ARGS(nid, score_before, score_after, migrate_scanned, free_scanned,
+		defer),
+
+	TP_STRUCT__entry(
+		__field(int, nid)
+		__field(unsigned int, score_before)
+		__field(unsigned int, score_after)
+		__field(unsigned long, migrate_scanned)
+		__field(unsigned long, free_scanned)
+		__field(unsigned int, defer)
+	),
+
+	TP_fast_assign(
+		__entry->nid = nid;
+		__entry->score_before = score_before;
+		__entry->score_after = score_after;
+		__entry->migrate_scanned = migrate_scanned;
+		__entry->free_scanned = free_scanned;
+		__entry->defer = defer;
+	),
+
+	TP_printk("nid=%d b=%u a=%u mig=%lu free=%lu defer=%u",
+		__entry->nid,
+		__entry->score_before,
+		__entry->score_after,
+		__entry->migrate_scanned,
+		__entry->free_scanned,
+		__entry->defer)
+);
+
 #endif /* _TRACE_COMPACTION_H */
 
 /* This part must be outside protection */
