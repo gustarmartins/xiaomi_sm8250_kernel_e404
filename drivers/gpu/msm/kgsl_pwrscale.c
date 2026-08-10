@@ -605,7 +605,14 @@ int kgsl_busmon_target(struct device *dev, unsigned long *freq, u32 flags)
 
 int kgsl_busmon_get_cur_freq(struct device *dev, unsigned long *freq)
 {
-	return 0;
+	/*
+	 * The bus monitor uses the GPU frequency table. Its governor passes
+	 * that frequency back to kgsl_busmon_target(). Returning success
+	 * without initializing @freq leaks stack garbage through cur_freq
+	 * and makes the monitor appear to run at an impossible rate.
+	 * Report the live frequency used by the partner GPU devfreq device.
+	 */
+	return kgsl_devfreq_get_cur_freq(dev, freq);
 }
 
 /*
