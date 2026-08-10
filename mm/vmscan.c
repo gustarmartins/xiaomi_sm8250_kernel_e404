@@ -3706,10 +3706,9 @@ static void inc_min_seq(struct lruvec *lruvec)
 	}
 }
 
-static bool try_to_inc_min_seq(struct lruvec *lruvec, bool can_swap)
+static void try_to_inc_min_seq(struct lruvec *lruvec, bool can_swap)
 {
 	int gen, type, zone;
-	bool success = false;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	DEFINE_MIN_SEQ(lruvec);
 
@@ -3742,10 +3741,7 @@ next:
 
 		reset_ctrl_pos(lruvec, type, true);
 		WRITE_ONCE(lrugen->min_seq[type], min_seq[type]);
-		success = true;
 	}
-
-	return success;
 }
 
 static void inc_max_seq(struct lruvec *lruvec)
@@ -4258,7 +4254,8 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 }
 
 static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
-		      int type, int tier, int *nr_taken, struct list_head *list)
+		      int nr_to_scan, int type, int tier, int *nr_taken,
+		      struct list_head *list)
 {
 	int i;
 	int gen;
@@ -4266,7 +4263,6 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	int sorted = 0;
 	int scanned = 0;
 	int isolated = 0;
-	int remaining = MAX_LRU_BATCH;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
@@ -4307,7 +4303,8 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 				skipped += delta;
 			}
 
-			if (!--remaining || max(isolated, skipped) >= MIN_LRU_BATCH)
+			if (scanned >= nr_to_scan ||
+			    max(isolated, skipped) >= MIN_LRU_BATCH)
 				break;
 		}
 
@@ -4316,7 +4313,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 			__count_zid_vm_events(PGSCAN_SKIP, zone, skipped);
 		}
 
-		if (!remaining || isolated >= MIN_LRU_BATCH)
+		if (scanned >= nr_to_scan || isolated >= MIN_LRU_BATCH)
 			break;
 	}
 
@@ -4329,12 +4326,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	*nr_taken = isolated;
 
-	/*
-	 * There might not be eligible pages due to reclaim_idx, may_unmap and
-	 * may_writepage. Check the remaining to prevent livelock if there is no
-	 * progress.
-	 */
-	return isolated || !remaining ? scanned : 0;
+	return scanned;
 }
 
 static int get_tier_idx(struct lruvec *lruvec, int type)
@@ -4385,13 +4377,14 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx
 	return type;
 }
 
-static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
-			 int *type_scanned, int *nr_taken,
-			 struct list_head *list)
+static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc,
+			 int nr_to_scan, int swappiness, int *type_scanned,
+			 int *nr_taken, int *nr_scanned, struct list_head *list)
 {
 	int i;
 	int type;
-	int scanned;
+	int scanned = 0;
+	int total_scanned = 0;
 	int tier = -1;
 	DEFINE_MIN_SEQ(lruvec);
 
@@ -4413,29 +4406,43 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swa
 	else
 		type = get_type_to_scan(lruvec, swappiness, &tier);
 
+	*nr_taken = 0;
+	*nr_scanned = 0;
+	*type_scanned = type;
+
 	for (i = !swappiness; i < ANON_AND_FILE; i++) {
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
-		scanned = scan_pages(lruvec, sc, type, tier, nr_taken, list);
-		if (scanned)
+		scanned = scan_pages(lruvec, sc, nr_to_scan, type, tier,
+				     nr_taken, list);
+		total_scanned += scanned;
+		if (*nr_taken) {
+			*type_scanned = type;
+			*nr_scanned = scanned;
 			break;
+		}
 
-		type = !type;
-		tier = -1;
+		/*
+		 * Scanning this type without isolation can still have promoted
+		 * or sorted enough pages to preserve its controller bias. Only
+		 * fall back to the other type when there was nothing to scan.
+		 */
+		if (!scanned) {
+			type = !type;
+			tier = -1;
+		}
 	}
 
-	*type_scanned = type;
-
-	return scanned;
+	return total_scanned;
 }
 
-static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
-		       bool *swapped)
+static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
+		       int nr_to_scan, int swappiness, bool *swapped)
 {
 	int type;
 	int scanned;
-	int nr_scanned;
+	int nr_scanned = 0;
 	int reclaimed;
 	int nr_taken = 0;
 	LIST_HEAD(list);
@@ -4448,15 +4455,15 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swapp
 
 	spin_lock_irq(&pgdat->lru_lock);
 
-	scanned = isolate_pages(lruvec, sc, swappiness, &type, &nr_taken,
-				&list);
-	nr_scanned = scanned;
+	/* Flush empty oldest generations left behind by page deletion. */
+	try_to_inc_min_seq(lruvec, swappiness);
 
-	if (try_to_inc_min_seq(lruvec, swappiness))
-		scanned++;
+	scanned = isolate_pages(lruvec, sc, nr_to_scan, swappiness, &type,
+				&nr_taken, &nr_scanned, &list);
 
-	if (get_nr_gens(lruvec, !swappiness) == MIN_NR_GENS)
-		scanned = 0;
+	/* Scanning can empty another oldest generation. */
+	if (scanned)
+		try_to_inc_min_seq(lruvec, swappiness);
 
 	spin_unlock_irq(&pgdat->lru_lock);
 
@@ -4612,6 +4619,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 
 	while (true) {
 		int delta;
+		int nr_batch;
 		int swappiness;
 		long nr_to_scan;
 
@@ -4626,7 +4634,8 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		if (!nr_to_scan)
 			goto done;
 
-		delta = evict_pages(lruvec, sc, swappiness, &swapped);
+		nr_batch = min_t(long, nr_to_scan, MIN_LRU_BATCH);
+		delta = evict_pages(lruvec, sc, nr_batch, swappiness, &swapped);
 		if (!delta)
 			goto done;
 
@@ -5096,10 +5105,18 @@ static int run_eviction(struct lruvec *lruvec, unsigned long seq, struct scan_co
 	blk_start_plug(&plug);
 
 	while (!signal_pending(current)) {
+		unsigned long nr_batch;
 		DEFINE_MIN_SEQ(lruvec);
 
-		if (seq < min_seq[!swappiness] || sc->nr_reclaimed >= nr_to_reclaim ||
-		    !evict_pages(lruvec, sc, swappiness, NULL)) {
+		if (seq < min_seq[!swappiness] ||
+		    sc->nr_reclaimed >= nr_to_reclaim) {
+			err = 0;
+			break;
+		}
+
+		nr_batch = min(nr_to_reclaim - sc->nr_reclaimed,
+			       (unsigned long)MIN_LRU_BATCH);
+		if (!evict_pages(lruvec, sc, nr_batch, swappiness, NULL)) {
 			err = 0;
 			break;
 		}
