@@ -1621,7 +1621,7 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	uclamp_rq_inc(rq, p, flags);
 
 	p->sched_class->enqueue_task(rq, p, flags);
-
+	walt_update_last_enqueue(p);
 }
 
 /*
@@ -1629,6 +1629,8 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
  */
 inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	bool dequeued;
+
 	if (!(flags & DEQUEUE_NOCLOCK))
 		update_rq_clock(rq);
 
@@ -1643,7 +1645,12 @@ inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	 */
 	uclamp_rq_dec(rq, p);
 
-	return p->sched_class->dequeue_task(rq, p, flags);
+	dequeued = p->sched_class->dequeue_task(rq, p, flags);
+#ifdef CONFIG_SCHED_WALT
+	if (dequeued && p == rq->ed_task)
+		early_detection_notify(rq, sched_ktime_clock());
+#endif
+	return dequeued;
 }
 
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
@@ -2001,26 +2008,12 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 
 	if (cpumask_equal(&p->cpus_allowed, new_mask))
 		goto out;
-#ifdef CONFIG_SCHED_WALT
-	cpumask_andnot(&allowed_mask, new_mask, cpu_isolated_mask);
-	cpumask_and(&allowed_mask, &allowed_mask, cpu_valid_mask);
 
-	dest_cpu = cpumask_any(&allowed_mask);
-	if (dest_cpu >= nr_cpu_ids) {
-		cpumask_and(&allowed_mask, cpu_valid_mask, new_mask);
-		dest_cpu = cpumask_any(&allowed_mask);
-		if (!cpumask_intersects(new_mask, cpu_valid_mask)) {
-			ret = -EINVAL;
-			goto out;
-		}
-	}
-#else
 	dest_cpu = cpumask_any_and(cpu_valid_mask, new_mask);
 	if (dest_cpu >= nr_cpu_ids) {
 		ret = -EINVAL;
 		goto out;
 	}
-#endif
 	do_set_cpus_allowed(p, new_mask);
 
 	if (p->flags & PF_KTHREAD) {
@@ -2034,13 +2027,8 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	}
 
 	/* Can the task run on the task's current CPU? If so, we're done */
-#ifdef CONFIG_SCHED_WALT
-	if (cpumask_test_cpu(task_cpu(p), &allowed_mask))
-		goto out;
-#else
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
-#endif
 	if (task_running(rq, p) || p->state == TASK_WAKING) {
 		struct migration_arg arg = { p, dest_cpu };
 		/* Need help from migration thread: drop lock and wait. */
@@ -2117,7 +2105,8 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 
 	__set_task_cpu(p, new_cpu);
 }
-#ifdef CONFIG_NUMA_BALANCING
+
+#if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_SCHED_WALT)
 static void __migrate_swap_task(struct task_struct *p, int cpu)
 {
 	if (task_on_rq_queued(p)) {
@@ -2232,7 +2221,7 @@ int migrate_swap(struct task_struct *cur, struct task_struct *p,
 out:
 	return ret;
 }
-#endif /* CONFIG_NUMA_BALANCING */
+#endif /* CONFIG_NUMA_BALANCING || CONFIG_SCHED_WALT */
 /*
  * Calls to sched_migrate_to_cpumask_start() cannot nest. This can only be used
  * in process context.
@@ -3143,6 +3132,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * their previous state and preserve Program Order.
 	 */
 	smp_cond_load_acquire(&p->on_cpu, !VAL);
+	walt_try_to_wake_up(p);
 
 	cpu = select_task_rq(p, p->wake_cpu, &wake_flags);
 	if (task_cpu(p) != cpu) {
@@ -3443,6 +3433,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	unsigned long flags;
 
+	init_new_task_load(p);
 	__sched_fork(clone_flags, p);
 	/*
 	 * We mark the process as NEW here. This guarantees that
@@ -3577,6 +3568,7 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
+	mark_task_starting(p);
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
 	trace_sched_wakeup_new(p);
 	check_preempt_curr(rq, p, wake_flags);
@@ -6312,29 +6304,19 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	}
 #endif
 again:
-#ifdef CONFIG_SCHED_WALT
-	cpumask_andnot(&allowed_mask, new_mask, cpu_isolated_mask);
-	dest_cpu = cpumask_any_and(cpu_active_mask, &allowed_mask);
-	if (dest_cpu < nr_cpu_ids) {
-#endif
-		retval = __set_cpus_allowed_ptr(p, new_mask, true);
-		if (!retval) {
-			cpuset_cpus_allowed(p, cpus_allowed);
-			if (!cpumask_subset(new_mask, cpus_allowed)) {
-				/*
-				 * We must have raced with a concurrent cpuset
-				 * update. Just reset the cpus_allowed to the
-				 * cpuset's cpus_allowed
-				 */
-				cpumask_copy(new_mask, cpus_allowed);
-				goto again;
-			}
+	retval = __set_cpus_allowed_ptr(p, new_mask, true);
+	if (!retval) {
+		cpuset_cpus_allowed(p, cpus_allowed);
+		if (!cpumask_subset(new_mask, cpus_allowed)) {
+			/*
+			 * We must have raced with a concurrent cpuset
+			 * update. Just reset the cpus_allowed to the
+			 * cpuset's cpus_allowed
+			 */
+			cpumask_copy(new_mask, cpus_allowed);
+			goto again;
 		}
-#ifdef CONFIG_SCHED_WALT
-	} else {
-		retval = -EINVAL;
 	}
-#endif
 	if (!retval && !(p->flags & PF_KTHREAD))
 		cpumask_and(&p->cpus_requested, in_mask, cpu_possible_mask);
 out_free_new_mask:
@@ -6401,15 +6383,6 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	cpumask_and(mask, &p->cpus_allowed, cpu_active_mask);
-
-#ifdef CONFIG_SCHED_WALT
-	/* The userspace tasks are forbidden to run on
-	 * isolated CPUs. So exclude isolated CPUs from
-	 * the getaffinity.
-	 */
-	if (!(p->flags & PF_KTHREAD))
-		cpumask_andnot(mask, mask, cpu_isolated_mask);
-#endif
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:
@@ -7124,11 +7097,7 @@ static void migrate_tasks(struct rq *dead_rq, struct rq_flags *rf)
 	struct rq_flags orf = *rf;
 	int dest_cpu;
 	cpumask_t avail_cpus;
-#ifdef CONFIG_SCHED_WALT
-	cpumask_andnot(&avail_cpus, cpu_online_mask, cpu_isolated_mask);
-#else
 	cpumask_copy(&avail_cpus, cpu_online_mask);
-#endif
 	/*
 	 * Fudge the rq selection such that the below task selection loop
 	 * doesn't get stuck on the currently eligible stop task.
@@ -7356,6 +7325,13 @@ int sched_cpu_deactivate(unsigned int cpu)
 static void sched_rq_cpu_starting(unsigned int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
+#ifdef CONFIG_SCHED_WALT
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	set_window_start(rq);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+#endif
 
 	rq->calc_load_update = calc_load_update;
 	update_max_interval();
@@ -7365,6 +7341,7 @@ int sched_cpu_starting(unsigned int cpu)
 {
 	sched_rq_cpu_starting(cpu);
 	sched_tick_start(cpu);
+	clear_walt_request(cpu);
 	return 0;
 }
 
@@ -7387,6 +7364,7 @@ int sched_cpu_dying(unsigned int cpu)
 	BUG_ON(rq->nr_running != 1);
 	rq_unlock_irqrestore(rq, &rf);
 
+	clear_walt_request(cpu);
 
 	calc_load_migrate(rq);
 	update_max_interval();
@@ -7583,6 +7561,7 @@ void __init sched_init(void)
 #ifdef CONFIG_SCHED_WALT
 		rq->push_task = NULL;
 #endif
+		walt_sched_init_rq(rq);
 
 		INIT_LIST_HEAD(&rq->cfs_tasks);
 
@@ -7615,6 +7594,7 @@ void __init sched_init(void)
 	 * when this runqueue becomes "idle".
 	 */
 	init_idle(current, smp_processor_id());
+	init_new_task_load(current);
 
 	calc_load_update = jiffies + LOAD_FREQ;
 
