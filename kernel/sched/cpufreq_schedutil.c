@@ -277,9 +277,23 @@ unsigned long sugov_effective_cpu_perf(int cpu, unsigned long actual,
 
 static void sugov_get_util(struct sugov_cpu *sg_cpu, unsigned long boost)
 {
-	unsigned long min, max, util = cpu_util_cfs(cpu_rq(sg_cpu->cpu));
+	unsigned long min, max, util;
 
+#ifdef CONFIG_SCHED_WALT
+	struct sched_walt_cpu_load walt_load = { };
+
+	util = cpu_util_freq_walt(sg_cpu->cpu, &walt_load);
+	/*
+	 * WALT's frequency signal already includes runnable work from every
+	 * scheduling class and IRQ execution.  Ask effective_cpu_util() only
+	 * for the current DL/RT/uclamp bounds; adding its return value would
+	 * account those classes twice.
+	 */
+	effective_cpu_util(sg_cpu->cpu, 0, &min, &max);
+#else
+	util = cpu_util_cfs(cpu_rq(sg_cpu->cpu));
 	util = effective_cpu_util(sg_cpu->cpu, util, &min, &max);
+#endif
 	util = max(util, boost);
 	sg_cpu->bw_min = min;
 	sg_cpu->util = sugov_effective_cpu_perf(sg_cpu->cpu, util, min, max);
