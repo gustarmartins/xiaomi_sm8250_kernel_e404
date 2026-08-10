@@ -6447,6 +6447,14 @@ static inline void hrtick_update(struct rq *rq)
 #endif
 
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_WALT
+bool __cpu_overutilized(int cpu, int delta)
+{
+	return capacity_orig_of(cpu) * SCHED_CAPACITY_SCALE <
+		(cpu_util(cpu) + delta) * sched_capacity_margin_up[cpu];
+}
+#endif
+
 bool cpu_overutilized(int cpu)
 {
 	unsigned long rq_util_max;
@@ -8358,7 +8366,9 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 {
 	unsigned int max_util, cpu_util, cpu_cap;
 	unsigned long sum_util, energy = 0;
+#ifndef CONFIG_SCHED_WALT
 	unsigned long min, max;
+#endif
 	int cpu;
 
 	for (; pd; pd = pd->next) {
@@ -8577,14 +8587,9 @@ static DEFINE_PER_CPU(cpumask_t, energy_cpus);
  * let's keep things simple by re-using the existing slow path.
  */
 
-#ifdef CONFIG_SCHED_WALT
 static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 				     int sync, bool sync_boost,
-				     int sibling_count_hint)
-#else
-static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
-                                     int sync, bool sync_boost)
-#endif
+				     int sibling_count_hint __maybe_unused)
 {
 	unsigned long prev_energy = ULONG_MAX, best_energy = ULONG_MAX;
 	struct root_domain *rd = cpu_rq(smp_processor_id())->rd;
@@ -8711,11 +8716,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 #endif
 	if (task_placement_boost_enabled(p) || fbt_env.need_idle ||
 	    prefer_high_cap || is_rtg || __cpu_overutilized(prev_cpu, delta) ||
-#ifdef CONFIG_SCHED_WALT
-	    !task_fits_max(p, prev_cpu) || cpu_isolated(prev_cpu)) {
-#else
-            !task_fits_max(p, prev_cpu)) {
-#endif
+	    !task_fits_max(p, prev_cpu)) {
 		best_energy_cpu = cpu;
 		goto unlock;
 	}
@@ -8796,8 +8797,9 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
-                if (sched_energy_enabled()) {
-			new_cpu = find_energy_efficient_cpu(p, prev_cpu, sync, 1);
+		if (sched_energy_enabled()) {
+			new_cpu = find_energy_efficient_cpu(p, prev_cpu,
+							    sync, 1, 0);
 			if (new_cpu >= 0)
 				return new_cpu;
 			new_cpu = prev_cpu;
@@ -9750,15 +9752,6 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 		}
 	}
 
-	if (env->flags & LBF_IGNORE_PREFERRED_CLUSTER_TASKS &&
-			 !preferred_cluster(cpu_rq(env->dst_cpu)->cluster, p))
-		return 0;
-
-	/* Don't detach task if it doesn't fit on the destination */
-	if (env->flags & LBF_IGNORE_BIG_TASKS &&
-		!task_fits_max(p, env->dst_cpu))
-		return 0;
-
 	/* Don't detach task if it is under active migration */
 	if (env->src_rq->push_task == p)
 		return 0;
@@ -9984,11 +9977,6 @@ static int detach_tasks(struct lb_env *env)
 
 		continue;
 next:
-#ifdef CONFIG_SCHED_WALT
-		trace_sched_load_balance_skip_tasks(env->src_cpu, env->dst_cpu,
-				env->src_grp_type, p->pid, load, task_util(p),
-				cpumask_bits(&p->cpus_allowed)[0]);
-#endif
 		list_move(&p->se.group_node, tasks);
 	}
 
@@ -10544,11 +10532,6 @@ group_is_overloaded(unsigned int imbalance_pct, struct sg_lb_stats *sgs)
 {
 	if (sgs->sum_nr_running <= sgs->group_weight)
 		return false;
-
-#ifdef CONFIG_SCHED_WALT
-	if (env->idle != CPU_NOT_IDLE && walt_rotation_enabled)
-		return true;
-#endif
 
 	if ((sgs->group_capacity * 100) <
 			(sgs->group_util * imbalance_pct))
@@ -11303,7 +11286,7 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
 	 * needs to be done at the next sched domain level as well.
 	 */
 	if (env->sd->parent &&
-	    sds->total_capacity * 1024 < sds->total_util *
+	    sds->total_capacity * 1024 < sum_util *
 			 sched_capacity_margin_up[group_first_cpu(sds->local)])
 		set_sd_overutilized(env->sd->parent);
 #endif
@@ -12234,7 +12217,7 @@ static int active_load_balance_cpu_stop(void *data)
 	struct task_struct *push_task = NULL;
 	int push_task_detached = 0;
 	struct lb_env env = {
-		.sd                     = sd,
+		.sd                     = NULL,
 		.dst_cpu                = target_cpu,
 		.dst_rq                 = target_rq,
 		.src_cpu                = busiest_rq->cpu,
@@ -12281,7 +12264,6 @@ static int active_load_balance_cpu_stop(void *data)
 			update_rq_clock(busiest_rq);
 			detach_task(push_task, &env);
 			push_task_detached = 1;
-			moved = true;
 		}
 		goto out_unlock;
 	}
@@ -12541,9 +12523,6 @@ static inline int find_energy_aware_new_ilb(void)
 
 	cpumask_and(&idle_cpus, nohz.idle_cpus_mask,
 			housekeeping_cpumask(HK_FLAG_MISC));
-#ifdef CONFIG_SCHED_WALT
-	cpumask_andnot(&idle_cpus, &idle_cpus, cpu_isolated_mask);
-#endif
 	sg = sd->groups;
 	do {
 		int i;
@@ -13074,28 +13053,6 @@ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle
 
 static inline void nohz_newidle_balance(struct rq *this_rq) { }
 #endif /* CONFIG_NO_HZ_COMMON */
-
-#ifdef CONFIG_SCHED_WALT
-static bool silver_has_big_tasks(void)
-{
-	int cpu;
-
-	for_each_possible_cpu(cpu) {
-		if (!is_min_capacity_cpu(cpu))
-			break;
-
-		if (walt_big_tasks(cpu))
-			return true;
-	}
-
-	return false;
-}
-#else
-static inline bool silver_has_big_tasks(void)
-{
-	return false;
-}
-#endif
 
 /*
  * idle_balance is called by schedule() if this_cpu is about to become

@@ -246,12 +246,14 @@ enum sysctl_writes_mode {
 
 static enum sysctl_writes_mode sysctl_writes_strict = SYSCTL_WRITES_STRICT;
 
+#ifdef CONFIG_PELT_COMPATIBILITY_LAYER
 static int sysctl_sched_lib_name_handler(struct ctl_table *table, int write,
-                                         void __user *buffer, size_t *lenp,
-                                         loff_t *ppos)
+					 void __user *buffer, size_t *lenp,
+					 loff_t *ppos)
 {
-    return 0;
+	return 0;
 }
+#endif
 
 static int proc_do_cad_pid(struct ctl_table *table, int write,
 		  void __user *buffer, size_t *lenp, loff_t *ppos);
@@ -913,6 +915,7 @@ static struct ctl_table kern_table[] = {
 		.extra1		= &one,
 	},
 #endif
+#ifdef CONFIG_PELT_COMPATIBILITY_LAYER
 	{
 		.procname	= "sched_lib_name",
 		.data		= sched_lib_name,
@@ -929,6 +932,7 @@ static struct ctl_table kern_table[] = {
 		.extra1		= &zero,
 		.extra2		= &two_hundred_fifty_five,
 	},
+#endif
 #if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
 	{
 		.procname	= "sched_energy_aware",
@@ -3782,6 +3786,29 @@ int proc_douintvec_capacity(struct ctl_table *table, int write,
 				do_proc_douintvec_capacity_conv, NULL);
 }
 
+static int do_proc_douintvec_rwin(bool *negp, unsigned long *lvalp,
+				  int *valp, int write, void *data)
+{
+	if (write) {
+		if ((*lvalp >= 2 && *lvalp <= 5) || *lvalp == 8)
+			*valp = *lvalp;
+		else
+			return -EINVAL;
+	} else {
+		*negp = false;
+		*lvalp = *valp;
+	}
+
+	return 0;
+}
+
+int proc_douintvec_ravg_window(struct ctl_table *table, int write,
+			       void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	return do_proc_dointvec(table, write, buffer, lenp, ppos,
+				do_proc_douintvec_rwin, NULL);
+}
+
 
 #else /* CONFIG_PROC_SYSCTL */
 
@@ -3841,6 +3868,12 @@ int proc_doulongvec_minmax(struct ctl_table *table, int write,
 
 int proc_doulongvec_ms_jiffies_minmax(struct ctl_table *table, int write,
 				      void *buffer, size_t *lenp, loff_t *ppos)
+{
+	return -ENOSYS;
+}
+
+int proc_douintvec_ravg_window(struct ctl_table *table, int write,
+			       void *buffer, size_t *lenp, loff_t *ppos)
 {
 	return -ENOSYS;
 }
