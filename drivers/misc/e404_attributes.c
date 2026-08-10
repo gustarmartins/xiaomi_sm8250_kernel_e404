@@ -31,15 +31,16 @@ struct e404_attributes e404_data = {
     .kgsl_skip_zeroing          = 0,
     .file_sync                  = 1,
 #ifdef CONFIG_BOARD_PIPA
-    .panel_oem_width_pipa       = 1662,
-    .panel_oem_height_pipa      = 2660,
+    /* dsi_panel_phy_props and DRM expose these values in millimetres. */
+    .panel_oem_width_pipa       = 166,
+    .panel_oem_height_pipa      = 266,
     .panel_width_pipa           = 166,
     .panel_height_pipa          = 266,
 #else
     .panel_width                = 70,
     .panel_height               = 155,
-    .panel_oem_width            = 700,
-    .panel_oem_height           = 1550,
+    .panel_oem_width            = 70,
+    .panel_oem_height           = 155,
 #endif
     .bg_blocklist               = "com.shopee.id,com.lazada.android,com.tokopedia.tkpd",
 };
