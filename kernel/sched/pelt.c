@@ -495,11 +495,12 @@ int update_irq_load_avg(struct rq *rq, u64 running)
 }
 #endif
 
-__read_mostly unsigned int sched_pelt_lshift;
 #ifdef CONFIG_BOARD_MUNCH
-/* Use the validated effective 8 ms response with the fixed 16 ms tables. */
+/* Keep the reported boot multiplier and the effective PELT clock in sync. */
+__read_mostly unsigned int sched_pelt_lshift = 1;
 unsigned int sysctl_sched_pelt_multiplier = 2;
 #else
+__read_mostly unsigned int sched_pelt_lshift;
 unsigned int sysctl_sched_pelt_multiplier = 1;
 #endif
 
