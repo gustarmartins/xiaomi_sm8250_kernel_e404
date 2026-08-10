@@ -1651,6 +1651,25 @@ static __always_inline void update_lru_sizes(struct lruvec *lruvec,
 
 }
 
+#ifdef CONFIG_CMA
+/*
+ * Reclaiming a CMA page is wasted work when the current allocation cannot
+ * use CMA. kswapd is excluded because its GFP_KERNEL mask does not describe
+ * the allocation context that woke it.
+ */
+static bool skip_cma(struct page *page, struct scan_control *sc)
+{
+	return !current_is_kswapd() &&
+		gfpflags_to_migratetype(sc->gfp_mask) != MIGRATE_MOVABLE &&
+		get_pageblock_migratetype(page) == MIGRATE_CMA;
+}
+#else
+static bool skip_cma(struct page *page, struct scan_control *sc)
+{
+	return false;
+}
+#endif
+
 /*
  * zone_lru_lock is heavily contended.  Some of the functions that
  * shrink the lists perform better by taking out a batch of pages
@@ -1693,7 +1712,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		page = lru_to_page(src);
 		prefetchw_prev_lru_page(page, src, flags);
 
-		if (page_zonenum(page) > sc->reclaim_idx) {
+		if (page_zonenum(page) > sc->reclaim_idx || skip_cma(page, sc)) {
 			list_move(&page->lru, &pages_skipped);
 			nr_skipped[page_zonenum(page)]++;
 			continue;
@@ -4036,6 +4055,10 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	if (spin_is_contended(pvmw->ptl))
 		return;
 
+	/* exclude special VMAs containing anonymous pages from COW */
+	if (pvmw->vma->vm_flags & VM_SPECIAL)
+		return;
+
 	/*
 	 * The page can race with memcg teardown/uncharge during OOM reaping,
 	 * leaving page_memcg() NULL; mem_cgroup_lruvec() does not guard a NULL
@@ -4216,7 +4239,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 	}
 
 	/* ineligible */
-	if (zone > sc->reclaim_idx) {
+	if (zone > sc->reclaim_idx || skip_cma(page, sc)) {
 		gen = page_inc_gen(lruvec, page, false);
 		list_move_tail(&page->lru, &lrugen->lists[gen][type][zone]);
 		return true;
