@@ -4226,8 +4226,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 		return true;
 	}
 
-	if (PageLocked(page) || PageWriteback(page) ||
-	    (type == LRU_GEN_FILE && PageDirty(page))) {
+	if (PageLocked(page)) {
 		gen = page_inc_gen(lruvec, page, true);
 		list_move(&page->lru, &lrugen->lists[gen][type][zone]);
 		return true;
@@ -4259,7 +4258,7 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 }
 
 static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
-		      int type, int tier, struct list_head *list)
+		      int type, int tier, int *nr_taken, struct list_head *list)
 {
 	int i;
 	int gen;
@@ -4328,6 +4327,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	}
 	__count_memcg_events(memcg, item, isolated);
 	__count_memcg_events(memcg, PGREFILL, sorted);
+	*nr_taken = isolated;
 
 	/*
 	 * There might not be eligible pages due to reclaim_idx, may_unmap and
@@ -4386,7 +4386,8 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx
 }
 
 static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
-			 int *type_scanned, struct list_head *list)
+			 int *type_scanned, int *nr_taken,
+			 struct list_head *list)
 {
 	int i;
 	int type;
@@ -4416,7 +4417,7 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swa
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
-		scanned = scan_pages(lruvec, sc, type, tier, list);
+		scanned = scan_pages(lruvec, sc, type, tier, nr_taken, list);
 		if (scanned)
 			break;
 
@@ -4434,17 +4435,22 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swapp
 {
 	int type;
 	int scanned;
+	int nr_scanned;
 	int reclaimed;
+	int nr_taken = 0;
 	LIST_HEAD(list);
 	struct page *page;
 	enum vm_event_item item;
+	struct reclaim_stat stat = {};
 	struct lru_gen_mm_walk *walk;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
 	spin_lock_irq(&pgdat->lru_lock);
 
-	scanned = isolate_pages(lruvec, sc, swappiness, &type, &list);
+	scanned = isolate_pages(lruvec, sc, swappiness, &type, &nr_taken,
+				&list);
+	nr_scanned = scanned;
 
 	if (try_to_inc_min_seq(lruvec, swappiness))
 		scanned++;
@@ -4457,20 +4463,37 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swapp
 	if (list_empty(&list))
 		return scanned;
 
-	reclaimed = shrink_page_list(&list, pgdat, sc, 0, NULL, false);
+	reclaimed = shrink_page_list(&list, pgdat, sc, 0, &stat, false);
+
+	/*
+	 * Match the classic LRU response when the coldest file batch is all
+	 * dirty and not yet queued for I/O. Delaying this nudge until the end
+	 * of a complete MGLRU reclaim cycle can leave allocation stalls waiting
+	 * behind passive writeback.
+	 */
+	if (stat.nr_unqueued_dirty == nr_taken)
+		wakeup_flusher_threads(WB_REASON_VMSCAN);
+
+	sc->nr.dirty += stat.nr_dirty;
+	sc->nr.congested += stat.nr_congested;
+	sc->nr.unqueued_dirty += stat.nr_unqueued_dirty;
+	sc->nr.writeback += stat.nr_writeback;
+	sc->nr.immediate += stat.nr_immediate;
+	sc->nr.taken += nr_taken;
+	if (type == LRU_GEN_FILE)
+		sc->nr.file_taken += nr_taken;
+
+	trace_mm_vmscan_lru_shrink_inactive(pgdat->node_id,
+					    nr_scanned, reclaimed, &stat,
+					    sc->priority,
+					    type == LRU_GEN_FILE);
 
 	/*
 	 * To avoid livelock, don't add rejected pages back to the same lists
 	 * they were isolated from. See lru_gen_add_page().
 	 */
 	list_for_each_entry(page, &list, lru) {
-		ClearPageReferenced(page);
-		ClearPageWorkingset(page);
-
-		if (PageReclaim(page) && (PageDirty(page) || PageWriteback(page)))
-			ClearPageActive(page);
-		else
-			SetPageActive(page);
+		SetPageActive(page);
 	}
 
 	spin_lock_irq(&pgdat->lru_lock);
