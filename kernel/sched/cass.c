@@ -41,10 +41,16 @@ static __always_inline
 void cass_cpu_util(struct cass_cpu_cand *c, int this_cpu, bool sync)
 {
 	struct rq *rq = cpu_rq(c->cpu);
+#ifndef CONFIG_SCHED_WALT
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	unsigned long est;
+#endif
 
-	/* Get this CPU's utilization from CFS tasks */
+	/* Get this CPU's runnable utilization. */
+#ifdef CONFIG_SCHED_WALT
+	/* WALT's rq demand contains CFS, RT and Deadline runnable tasks. */
+	c->util = READ_ONCE(rq->walt_stats.cumulative_runnable_avg_scaled);
+#else
 	c->util = READ_ONCE(cfs_rq->avg.util_avg);
 	if (sched_feat(UTIL_EST)) {
 		est = READ_ONCE(cfs_rq->avg.util_est);
@@ -54,6 +60,7 @@ void cass_cpu_util(struct cass_cpu_cand *c, int this_cpu, bool sync)
 			c->util = est;
 		}
 	}
+#endif
 
 	/*
 	 * Deduct @current's util from this CPU if this is a sync wake, unless
@@ -62,8 +69,12 @@ void cass_cpu_util(struct cass_cpu_cand *c, int this_cpu, bool sync)
 	if (sync && c->cpu == this_cpu && !rt_task(current))
 		c->util -= min(c->util, task_util(current));
 
-	/* Get the utilization of everything other than CFS tasks */
+	/* Get utilization not already represented in c->util. */
+#ifdef CONFIG_SCHED_WALT
+	c->hard_util = cpu_util_irq(rq);
+#else
 	c->hard_util = cpu_util_rt(rq) + cpu_util_dl(rq) + cpu_util_irq(rq);
+#endif
 
 	/*
 	 * Account for lost capacity due to time spent in RT/DL tasks and IRQs.
