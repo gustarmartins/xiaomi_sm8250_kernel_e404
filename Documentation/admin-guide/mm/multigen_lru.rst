@@ -66,15 +66,18 @@ experience. The multi-gen LRU offers thrashing prevention to the
 majority of laptop and desktop users who do not have ``oomd``.
 
 Users can write ``N`` to ``min_ttl_ms`` to prevent the working set of
-``N`` milliseconds from getting evicted. The OOM killer is triggered
-if this working set cannot be kept in memory. In other words, this
-option works as an adjustable pressure relief valve, and when open, it
-terminates applications that are hopefully not being used.
+``N`` milliseconds from getting evicted. The upstream donor triggers the OOM
+killer if this working set cannot be kept in memory. This Android 4.19
+backport instead increments ``min_ttl_unsatisfied`` and retries that aging
+cycle without TTL protection. ``min_ttl_fail_open`` reads ``1`` when
+userspace can rely on this fallback. The configured TTL therefore remains
+best-effort and cannot by itself turn an allocation burst into a TTL-specific
+kernel OOM.
 
 Based on the average human detectable lag (~100ms), ``N=1000`` usually
-eliminates intolerable janks due to thrashing. Larger values like
-``N=3000`` make janks less noticeable at the risk of premature OOM
-kills.
+eliminates intolerable janks due to thrashing. Larger values like ``N=3000``
+defer more reclaim before this kernel's fail-open fallback and can increase
+reclaim latency or refault cost.
 
 The default value ``0`` means disabled.
 

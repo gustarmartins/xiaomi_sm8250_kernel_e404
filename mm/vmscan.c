@@ -4896,6 +4896,21 @@ static struct kobj_attribute lru_gen_min_ttl_unsatisfied_attr = __ATTR(
 	min_ttl_unsatisfied, 0444, show_min_ttl_unsatisfied, NULL
 );
 
+/*
+ * Userspace policy must not infer donor OOM semantics from the presence of
+ * min_ttl_unsatisfied. This backport deliberately retries the aging cycle
+ * without TTL instead. Export that ABI so a pressure daemon can treat the
+ * counter as fallback telemetry rather than disabling reclaim or MGLRU.
+ */
+static ssize_t show_min_ttl_fail_open(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "1\n");
+}
+
+static struct kobj_attribute lru_gen_min_ttl_fail_open_attr =
+	__ATTR(min_ttl_fail_open, 0444, show_min_ttl_fail_open, NULL);
+
 static ssize_t show_enable(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	unsigned int caps = 0;
@@ -4944,6 +4959,7 @@ static struct kobj_attribute lru_gen_enabled_attr = __ATTR(
 );
 
 static struct attribute *lru_gen_attrs[] = {
+	&lru_gen_min_ttl_fail_open_attr.attr,
 	&lru_gen_min_ttl_unsatisfied_attr.attr,
 	&lru_gen_min_ttl_attr.attr,
 	&lru_gen_enabled_attr.attr,
