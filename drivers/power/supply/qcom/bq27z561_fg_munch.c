@@ -77,6 +77,7 @@ module_param_named(
 #define BQ_I2C_FAILED_SOC	15
 #define BQ_I2C_FAILED_TEMP	250
 #define BQ_I2C_FAILED_TEMP_HIGH	500
+#define BQ_TEMP_RAW_MAX		32767
 #define BMS_FG_VERIFY		"BMS_FG_VERIFY"
 #define BMS_VERIFY_VOTER	"BATT_VERIFY_VOTER"
 
@@ -1101,7 +1102,9 @@ static int i2c_error_cnt[FG_MAX_INDEX];
 static int fg_read_temperature(struct bq_fg_chip *bq)
 {
 	int ret;
+	int fallback;
 	u16 temp = 0;
+	u16 retry_temp = 0;
 	static int last_temp[FG_MAX_INDEX];
 
 	if (bq->fake_temp > 0)
@@ -1118,6 +1121,31 @@ static int fg_read_temperature(struct bq_fg_chip *bq)
 			return BQ_I2C_FAILED_TEMP_HIGH;
 		}
 		return BQ_I2C_FAILED_TEMP;
+	}
+
+	/*
+	 * Temperature() is an unsigned 15-bit value in 0.1 K.  A successful
+	 * SMBus transaction can still return a corrupt word; do not expose its
+	 * sign bit as a multi-thousand-degree reading to Android's emergency
+	 * shutdown policy.  Retry once, then retain the last valid sample.
+	 */
+	if (temp > BQ_TEMP_RAW_MAX) {
+		ret = fg_read_word(bq, bq->regs[BQ_FG_REG_TEMP], &retry_temp);
+		if (ret >= 0 && retry_temp <= BQ_TEMP_RAW_MAX) {
+			printk_ratelimited(KERN_WARNING
+					   "bq27z561: invalid temperature raw=0x%04x, recovered=0x%04x\n",
+					   temp, retry_temp);
+			temp = retry_temp;
+		} else {
+			fallback = last_temp[bq->fg_index] ?
+				last_temp[bq->fg_index] : BQ_I2C_FAILED_TEMP;
+			if (i2c_error_cnt[bq->fg_index] < 3)
+				i2c_error_cnt[bq->fg_index]++;
+			printk_ratelimited(KERN_WARNING
+					   "bq27z561: invalid temperature raw=0x%04x retry=%d/0x%04x, using %d\n",
+					   temp, ret, retry_temp, fallback);
+			return fallback;
+		}
 	}
 	i2c_error_cnt[bq->fg_index] = 0;
 	last_temp[bq->fg_index] = temp - 2730;
@@ -3109,4 +3137,3 @@ module_i2c_driver(bq_fg_driver);
 MODULE_DESCRIPTION("TI BQ27Z561 Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Texas Instruments");
-
