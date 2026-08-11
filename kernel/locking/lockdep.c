@@ -50,12 +50,9 @@
 #include <linux/random.h>
 #include <linux/jhash.h>
 #include <linux/nmi.h>
-<<<<<<< HEAD
-=======
 #include <linux/rcupdate.h>
 #include <linux/kprobes.h>
 #include <linux/lockdep.h>
->>>>>>> 1b251ed3225ed (lockdep: Add lockdep lock state defines)
 
 #include <asm/sections.h>
 #include <asm/stacktrace.h>
@@ -1287,7 +1284,7 @@ static int noop_count(struct lock_list *entry, void *data)
 static unsigned long __lockdep_count_forward_deps(struct lock_list *this)
 {
 	unsigned long  count = 0;
-	struct lock_list *uninitialized_var(target_entry);
+	struct lock_list *target_entry;
 
 	__bfs_forwards(this, (void *)&count, noop_count, &target_entry);
 
@@ -1315,7 +1312,7 @@ unsigned long lockdep_count_forward_deps(struct lock_class *class)
 static unsigned long __lockdep_count_backward_deps(struct lock_list *this)
 {
 	unsigned long  count = 0;
-	struct lock_list *uninitialized_var(target_entry);
+	struct lock_list *target_entry;
 
 	__bfs_backwards(this, (void *)&count, noop_count, &target_entry);
 
@@ -1623,8 +1620,8 @@ check_usage(struct task_struct *curr, struct held_lock *prev,
 {
 	int ret;
 	struct lock_list this, that;
-	struct lock_list *uninitialized_var(target_entry);
-	struct lock_list *uninitialized_var(target_entry1);
+	struct lock_list *target_entry;
+	struct lock_list *target_entry1;
 
 	this.parent = NULL;
 
@@ -1878,7 +1875,7 @@ check_prev_add(struct task_struct *curr, struct held_lock *prev,
 	       struct held_lock *next, int distance, struct stack_trace *trace,
 	       int (*save)(struct stack_trace *trace))
 {
-	struct lock_list *uninitialized_var(target_entry);
+	struct lock_list *target_entry;
 	struct lock_list *entry;
 	struct lock_list this;
 	int ret;
@@ -2679,7 +2676,7 @@ check_usage_forwards(struct task_struct *curr, struct held_lock *this,
 {
 	int ret;
 	struct lock_list root;
-	struct lock_list *uninitialized_var(target_entry);
+	struct lock_list *target_entry;
 
 	root.parent = NULL;
 	root.class = hlock_class(this);
@@ -2703,7 +2700,7 @@ check_usage_backwards(struct task_struct *curr, struct held_lock *this,
 {
 	int ret;
 	struct lock_list root;
-	struct lock_list *uninitialized_var(target_entry);
+	struct lock_list *target_entry;
 
 	root.parent = NULL;
 	root.class = hlock_class(this);
@@ -3377,9 +3374,10 @@ static void __lockdep_init_map_waits(struct lockdep_map *lock, const char *name,
 }
 
 void lockdep_init_map_waits(struct lockdep_map *lock, const char *name,
-		      struct lock_class_key *key, int subclass)
+		      struct lock_class_key *key, int subclass,
+		      short inner, short outer)
 {
-	__lockdep_init_map_waits(lock, name, key, subclass);
+	__lockdep_init_map_waits(lock, name, key, subclass, inner, outer);
 }
 EXPORT_SYMBOL_GPL(lockdep_init_map_waits);
 
@@ -3557,6 +3555,9 @@ static int __lock_acquire(struct lockdep_map *lock, unsigned int subclass,
 		hlock->acquire_ip_caller = lockdep_walk_stack(ip);
 	else
 		hlock->acquire_ip_caller = ip_caller;
+
+	if (check_wait_context(curr, hlock))
+		return 0;
 
 	if (check && !mark_irqflags(curr, hlock))
 		return 0;
@@ -3921,13 +3922,8 @@ static int __lock_is_held(const struct lockdep_map *lock, int read)
 		struct held_lock *hlock = curr->held_locks + i;
 
 		if (match_held_lock(hlock, lock)) {
-<<<<<<< HEAD
-			if (read == -1 || hlock->read == read)
-				return 1;
-=======
 			if (read == -1 || !!hlock->read == read)
 				return LOCK_STATE_HELD;
->>>>>>> 1b251ed3225ed (lockdep: Add lockdep lock state defines)
 
 			return LOCK_STATE_NOT_HELD;
 		}
