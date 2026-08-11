@@ -1216,6 +1216,15 @@ const char * const vmstat_text[] = {
 	"pglazyfreed",
 
 	"pgrefill",
+#ifdef CONFIG_LRU_GEN
+	"mglru_scan_kswapd",
+	"mglru_scan_direct",
+	"mglru_sorted",
+	"mglru_skipped",
+	"mglru_isolated",
+	"mglru_reclaimed",
+	"mglru_empty_batch",
+#endif
 	"pgsteal_kswapd",
 	"pgsteal_direct",
 	"pgscan_kswapd",

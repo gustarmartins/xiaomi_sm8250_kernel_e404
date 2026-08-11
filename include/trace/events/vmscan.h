@@ -320,6 +320,63 @@ TRACE_EVENT(mm_vmscan_lru_isolate,
 		__print_symbolic(__entry->lru, LRU_NAMES))
 );
 
+#ifdef CONFIG_LRU_GEN
+TRACE_EVENT(mm_vmscan_mglru_isolate,
+
+	TP_PROTO(unsigned short memcg_id,
+		int priority,
+		int reclaim_idx,
+		int type,
+		int tier,
+		unsigned long nr_requested,
+		unsigned long nr_scanned,
+		unsigned long nr_sorted,
+		unsigned long nr_skipped,
+		unsigned long nr_isolated),
+
+	TP_ARGS(memcg_id, priority, reclaim_idx, type, tier, nr_requested,
+		nr_scanned, nr_sorted, nr_skipped, nr_isolated),
+
+	TP_STRUCT__entry(
+		__field(unsigned short, memcg_id)
+		__field(int, priority)
+		__field(int, reclaim_idx)
+		__field(int, type)
+		__field(int, tier)
+		__field(unsigned long, nr_requested)
+		__field(unsigned long, nr_scanned)
+		__field(unsigned long, nr_sorted)
+		__field(unsigned long, nr_skipped)
+		__field(unsigned long, nr_isolated)
+	),
+
+	TP_fast_assign(
+		__entry->memcg_id = memcg_id;
+		__entry->priority = priority;
+		__entry->reclaim_idx = reclaim_idx;
+		__entry->type = type;
+		__entry->tier = tier;
+		__entry->nr_requested = nr_requested;
+		__entry->nr_scanned = nr_scanned;
+		__entry->nr_sorted = nr_sorted;
+		__entry->nr_skipped = nr_skipped;
+		__entry->nr_isolated = nr_isolated;
+	),
+
+	TP_printk("memcg=%hu priority=%d reclaim_idx=%d type=%s tier=%d nr_requested=%lu nr_scanned=%lu nr_sorted=%lu nr_skipped=%lu nr_isolated=%lu",
+		__entry->memcg_id,
+		__entry->priority,
+		__entry->reclaim_idx,
+		__entry->type == LRU_GEN_FILE ? "file" : "anon",
+		__entry->tier,
+		__entry->nr_requested,
+		__entry->nr_scanned,
+		__entry->nr_sorted,
+		__entry->nr_skipped,
+		__entry->nr_isolated)
+);
+#endif
+
 TRACE_EVENT(mm_vmscan_writepage,
 
 	TP_PROTO(struct page *page),

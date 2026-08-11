@@ -4285,6 +4285,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	enum vm_event_item item;
 	int sorted = 0;
 	int scanned = 0;
+	int skipped = 0;
 	int isolated = 0;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
@@ -4298,7 +4299,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 
 	for (i = MAX_NR_ZONES; i > 0; i--) {
 		LIST_HEAD(moved);
-		int skipped = 0;
+		int zone_skipped = 0;
 		int zone = (sc->reclaim_idx + i) % MAX_NR_ZONES;
 		struct list_head *head = &lrugen->lists[gen][type][zone];
 
@@ -4323,17 +4324,18 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 				isolated += delta;
 			} else {
 				list_move(&page->lru, &moved);
-				skipped += delta;
+				zone_skipped += delta;
 			}
 
 			if (scanned >= nr_to_scan ||
-			    max(isolated, skipped) >= MIN_LRU_BATCH)
+			    max(isolated, zone_skipped) >= MIN_LRU_BATCH)
 				break;
 		}
 
-		if (skipped) {
+		if (zone_skipped) {
 			list_splice(&moved, head);
-			__count_zid_vm_events(PGSCAN_SKIP, zone, skipped);
+			__count_zid_vm_events(PGSCAN_SKIP, zone, zone_skipped);
+			skipped += zone_skipped;
 		}
 
 		if (scanned >= nr_to_scan || isolated >= MIN_LRU_BATCH)
@@ -4341,6 +4343,19 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	}
 
 	item = current_is_kswapd() ? PGSCAN_KSWAPD : PGSCAN_DIRECT;
+	__count_vm_events(current_is_kswapd() ? MGLRU_SCAN_KSWAPD :
+						 MGLRU_SCAN_DIRECT, scanned);
+	__count_vm_events(MGLRU_SORTED, sorted);
+	__count_vm_events(MGLRU_SKIPPED, skipped);
+	__count_vm_events(MGLRU_ISOLATED, isolated);
+	if (scanned && !isolated)
+		count_vm_event(MGLRU_EMPTY_BATCH);
+
+	trace_mm_vmscan_mglru_isolate(mem_cgroup_id(memcg), sc->priority,
+				       sc->reclaim_idx, type, tier,
+				       nr_to_scan, scanned, sorted,
+				       skipped, isolated);
+
 	if (global_reclaim(sc)) {
 		__count_vm_events(item, isolated);
 		__count_vm_events(PGREFILL, sorted);
@@ -4494,6 +4509,7 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
 		return scanned;
 
 	reclaimed = shrink_page_list(&list, pgdat, sc, 0, &stat, false);
+	__count_vm_events(MGLRU_RECLAIMED, reclaimed);
 
 	/*
 	 * Match the classic LRU response when the coldest file batch is all
