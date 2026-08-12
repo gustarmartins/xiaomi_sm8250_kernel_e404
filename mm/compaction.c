@@ -2627,7 +2627,22 @@ int sysctl_compact_memory;
  * aggressively the kernel should compact memory in the
  * background. It takes values in the range [0, 100].
  */
+/*
+ * This Android 4.19 tree does not enable transparent huge pages on munch.
+ * The proactive-compaction backport still scores fragmentation at PMD order
+ * in that configuration, so the generic value of 20 periodically scans and
+ * migrates the whole Normal zone for an order-9 target the phone does not use.
+ * Direct and kcompactd allocation-driven compaction remain available with a
+ * zero default; userspace can still opt into the speculative loop explicitly.
+ *
+ * Live K40 qualification on munch saw 822 proactive runs, 58M migration
+ * candidates and 160M free candidates scanned, but zero score improvements.
+ */
+#ifdef CONFIG_BOARD_MUNCH
+unsigned int __read_mostly sysctl_compaction_proactiveness;
+#else
 unsigned int __read_mostly sysctl_compaction_proactiveness = 20;
+#endif
 
 int compaction_proactiveness_sysctl_handler(
 		struct ctl_table *table, int write, void *buffer,
