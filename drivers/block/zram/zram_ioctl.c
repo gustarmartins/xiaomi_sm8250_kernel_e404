@@ -488,10 +488,13 @@ put_mm:
 }
 
 static int zram_ioctl_process_writeback(struct zram *zram,
-		struct zram_android_ioc_process_range_writeback *range)
+		struct zram_android_ioc_process_range_writeback *range,
+		unsigned int cmd)
 {
 	struct zram_pp_ctl *pp_ctl = NULL;
 	struct zram_wb_ctl *wb_ctl = NULL;
+	bool action_started = false;
+	u64 requested_pages;
 	int ret;
 
 	if (!capable(CAP_SYS_NICE))
@@ -521,6 +524,12 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 		ret = -ENOMEM;
 		goto clear_progress;
 	}
+	requested_pages = range->size ?
+		DIV_ROUND_UP_ULL(range->size, PAGE_SIZE) : 0;
+	zram_action_begin(zram, &zram->last_writeback_action, 2, cmd,
+			  requested_pages,
+			  atomic64_read(&zram->stats.bd_writes));
+	action_started = true;
 
 	ret = zram_ioctl_process_scan(zram,
 				      ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK,
@@ -530,6 +539,9 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 	range->written_bytes = zram_wb_processed_bytes(wb_ctl);
 
 clear_progress:
+	if (action_started)
+		zram_action_finish(zram, &zram->last_writeback_action, ret,
+				   atomic64_read(&zram->stats.bd_writes));
 	zram_wb_ctl_free(wb_ctl);
 	zram_pp_ctl_free(zram, pp_ctl);
 	atomic_set(&zram->pp_in_progress, 0);
@@ -542,6 +554,7 @@ static int zram_ioctl_process_prefetch(struct zram *zram,
 		struct zram_android_ioc_process_prefetch *prefetch)
 {
 	struct zram_pp_ctl *pp_ctl = NULL;
+	bool action_started = false;
 	int ret;
 
 	if (!capable(CAP_SYS_NICE))
@@ -567,6 +580,10 @@ static int zram_ioctl_process_prefetch(struct zram *zram,
 		ret = -ENOMEM;
 		goto clear_progress;
 	}
+	zram_action_begin(zram, &zram->last_prefetch_action, 2,
+			  ZRAM_ANDROID_IOC_PROCESS_PREFETCH, 0,
+			  atomic64_read(&zram->stats.bd_reads));
+	action_started = true;
 
 	ret = zram_ioctl_process_scan(zram, ZRAM_ANDROID_IOC_PROCESS_PREFETCH,
 				      prefetch->pidfd, NULL, pp_ctl);
@@ -574,6 +591,9 @@ static int zram_ioctl_process_prefetch(struct zram *zram,
 		ret = zram_prefetch_slots(zram, pp_ctl);
 
 clear_progress:
+	if (action_started)
+		zram_action_finish(zram, &zram->last_prefetch_action, ret,
+				   atomic64_read(&zram->stats.bd_reads));
 	zram_pp_ctl_free(zram, pp_ctl);
 	atomic_set(&zram->pp_in_progress, 0);
 unlock:
@@ -606,7 +626,7 @@ int zram_ioctl(struct block_device *bdev, fmode_t mode,
 
 		if (copy_from_user(&range, argp, sizeof(range)))
 			return -EFAULT;
-		ret = zram_ioctl_process_writeback(zram, &range);
+		ret = zram_ioctl_process_writeback(zram, &range, cmd);
 		if (copy_to_user(argp, &range, sizeof(range)))
 			ret = -EFAULT;
 	} else if (cmd == ZRAM_ANDROID_IOC_PROCESS_PREFETCH) {
@@ -622,7 +642,7 @@ int zram_ioctl(struct block_device *bdev, fmode_t mode,
 		if (copy_from_user(&legacy, argp, sizeof(legacy)))
 			return -EFAULT;
 		range.pidfd = legacy.data.process_writeback.pidfd;
-		ret = zram_ioctl_process_writeback(zram, &range);
+		ret = zram_ioctl_process_writeback(zram, &range, cmd);
 		legacy.data.process_writeback.written_bytes =
 			range.written_bytes;
 		if (copy_to_user(argp, &legacy, sizeof(legacy)))

@@ -32,7 +32,9 @@
 #include <linux/sysfs.h>
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
+#include <linux/cred.h>
 #include <linux/rcupdate.h>
+#include <linux/sched.h>
 
 #include "kcompressd.h"
 #include "zram_drv.h"
@@ -125,6 +127,67 @@ static inline bool init_done(struct zram *zram)
 static inline struct zram *dev_to_zram(struct device *dev)
 {
 	return (struct zram *)dev_to_disk(dev)->private_data;
+}
+
+void zram_action_begin(struct zram *zram, struct zram_action_stat *action,
+		       u32 source, u32 mode, u64 requested_pages, u64 before)
+{
+	struct zram_action_stat next = { };
+	unsigned long flags;
+
+	next.start_ns = ktime_get_boottime_ns();
+	next.requested_pages = requested_pages;
+	next.before = before;
+	next.pid = task_pid_nr(current);
+	next.uid = __kuid_val(current_uid());
+	next.source = source;
+	next.mode = mode;
+	get_task_comm(next.comm, current);
+
+	spin_lock_irqsave(&zram->action_lock, flags);
+	*action = next;
+	spin_unlock_irqrestore(&zram->action_lock, flags);
+}
+
+void zram_action_finish(struct zram *zram, struct zram_action_stat *action,
+			int result, u64 after)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&zram->action_lock, flags);
+	action->finish_ns = ktime_get_boottime_ns();
+	action->result = result;
+	action->after = after;
+	spin_unlock_irqrestore(&zram->action_lock, flags);
+}
+
+static ssize_t post_processing_stat_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	struct zram_action_stat wb, recomp, prefetch;
+	unsigned long flags;
+
+	spin_lock_irqsave(&zram->action_lock, flags);
+	wb = zram->last_writeback_action;
+	recomp = zram->last_recompress_action;
+	prefetch = zram->last_prefetch_action;
+	spin_unlock_irqrestore(&zram->action_lock, flags);
+
+	return scnprintf(buf, PAGE_SIZE,
+		"writeback start_ns=%llu finish_ns=%llu pid=%d uid=%u comm=%s source=%u mode=%u requested_pages=%llu before_pages=%llu after_pages=%llu result=%d\n"
+		"recompress start_ns=%llu finish_ns=%llu pid=%d uid=%u comm=%s source=%u mode=%u requested_pages=%llu before_bytes=%llu after_bytes=%llu result=%d\n"
+		"prefetch start_ns=%llu finish_ns=%llu pid=%d uid=%u comm=%s source=%u mode=%u requested_pages=%llu before_pages=%llu after_pages=%llu result=%d\n",
+		wb.start_ns, wb.finish_ns, wb.pid, wb.uid, wb.comm, wb.source, wb.mode,
+		wb.requested_pages, wb.before, wb.after, wb.result,
+		recomp.start_ns, recomp.finish_ns, recomp.pid, recomp.uid,
+		recomp.comm, recomp.source, recomp.mode, recomp.requested_pages,
+		recomp.before, recomp.after, recomp.result,
+		prefetch.start_ns, prefetch.finish_ns, prefetch.pid, prefetch.uid,
+		prefetch.comm, prefetch.source, prefetch.mode,
+		prefetch.requested_pages, prefetch.before, prefetch.after,
+		prefetch.result);
 }
 
 static unsigned long zram_get_handle(struct zram *zram, u32 index)
@@ -1588,6 +1651,7 @@ static ssize_t writeback_store(struct device *dev,
 	struct zram_wb_ctl *wb_ctl = NULL;
 	unsigned long index = 0;
 	ssize_t ret = len;
+	bool action_started = false;
 	int mode, err;
 
 	if (sysfs_streq(buf, "idle"))
@@ -1639,12 +1703,20 @@ static ssize_t writeback_store(struct device *dev,
 		goto release_init_lock;
 	}
 
+	zram_action_begin(zram, &zram->last_writeback_action, 1, mode,
+			  nr_pages, atomic64_read(&zram->stats.bd_writes));
+	action_started = true;
+
 	scan_slots_for_writeback(zram, mode, nr_pages, index, pp_ctl);
 	err = zram_writeback_slots(zram, pp_ctl, wb_ctl);
 	if (err)
 		ret = err;
 
 release_init_lock:
+	if (action_started)
+		zram_action_finish(zram, &zram->last_writeback_action,
+				   ret < 0 ? ret : 0,
+				   atomic64_read(&zram->stats.bd_writes));
 	zram_pp_ctl_free(zram, pp_ctl);
 	zram_wb_ctl_free(wb_ctl);
 	atomic_set(&zram->pp_in_progress, 0);
@@ -2808,6 +2880,15 @@ static int recompress_slot(struct zram *zram, u32 index, struct page *page,
 	zram_set_handle(zram, index, handle_new);
 	zram_set_obj_size(zram, index, comp_len_new);
 	zram_set_priority(zram, index, prio);
+#ifdef CONFIG_ZRAM_MEMORY_TRACKING
+	/*
+	 * zram_free_page() clears ac_time.  A successful recompression is an
+	 * explicit access and clears ZRAM_IDLE, so give the replacement object a
+	 * matching fresh timestamp.  Leaving zero here made a later age-based idle
+	 * pass classify the new object as ancient immediately.
+	 */
+	zram->table[index].ac_time = ktime_get_boottime();
+#endif
 
 	atomic64_add(comp_len_new, &zram->stats.compr_data_size);
 	atomic64_inc(&zram->stats.pages_stored);
@@ -2827,6 +2908,8 @@ static ssize_t recompress_store(struct device *dev,
 	u32 mode = 0, threshold = 0;
 	u32 prio, prio_max;
 	struct page *page = NULL;
+	bool action_started = false;
+	u64 requested_pages;
 	ssize_t ret;
 
 	prio = ZRAM_SECONDARY_COMP;
@@ -2942,6 +3025,12 @@ static ssize_t recompress_store(struct device *dev,
 		goto release_init_lock;
 	}
 
+	requested_pages = num_recomp_pages == ULLONG_MAX ? 0 : num_recomp_pages;
+	zram_action_begin(zram, &zram->last_recompress_action, 1, mode,
+			  requested_pages,
+			  atomic64_read(&zram->stats.compr_data_size));
+	action_started = true;
+
 	scan_slots_for_recompress(zram, mode, prio_max, ctl);
 
 	ret = len;
@@ -2974,6 +3063,10 @@ next:
 	}
 
 release_init_lock:
+	if (action_started)
+		zram_action_finish(zram, &zram->last_recompress_action,
+				   ret < 0 ? ret : 0,
+				   atomic64_read(&zram->stats.compr_data_size));
 	if (page)
 		__free_page(page);
 	zram_pp_ctl_free(zram, ctl);
@@ -3335,6 +3428,7 @@ static DEVICE_ATTR_RW(recomp_algorithm);
 static DEVICE_ATTR_WO(recompress);
 #endif
 static DEVICE_ATTR_WO(algorithm_params);
+static DEVICE_ATTR_RO(post_processing_stat);
 
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
@@ -3365,6 +3459,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_recompress.attr,
 #endif
 	&dev_attr_algorithm_params.attr,
+	&dev_attr_post_processing_stat.attr,
 	NULL,
 };
 
@@ -3390,6 +3485,7 @@ static int zram_add(void)
 	device_id = ret;
 
 	init_rwsem(&zram->init_lock);
+	spin_lock_init(&zram->action_lock);
 	zram_prefetch_cache_init(zram);
 #ifdef CONFIG_ZRAM_WRITEBACK
 	zram->wb_batch_size = 32;

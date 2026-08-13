@@ -16,6 +16,7 @@
 #define _ZRAM_DRV_H_
 
 #include <linux/rwsem.h>
+#include <linux/spinlock.h>
 #include <linux/zsmalloc.h>
 
 #ifdef CONFIG_ZRAM_ANDROID_IOCTL
@@ -94,6 +95,23 @@ struct zram_stats {
 #endif
 };
 
+#define ZRAM_ACTION_COMM_LEN 16
+
+/* Last userspace post-processing request, for policy-owner attribution. */
+struct zram_action_stat {
+	u64 start_ns;
+	u64 finish_ns;
+	u64 requested_pages; /* 0 means the userspace request was unbounded. */
+	u64 before;
+	u64 after;
+	pid_t pid;
+	uid_t uid;
+	s32 result;
+	u32 source;
+	u32 mode;
+	char comm[ZRAM_ACTION_COMM_LEN];
+};
+
 #ifdef CONFIG_ZRAM_MULTI_COMP
 #define ZRAM_PRIMARY_COMP	0U
 #define ZRAM_SECONDARY_COMP	1U
@@ -118,6 +136,10 @@ struct zram {
 	unsigned long limit_pages;
 
 	struct zram_stats stats;
+	spinlock_t action_lock;
+	struct zram_action_stat last_writeback_action;
+	struct zram_action_stat last_recompress_action;
+	struct zram_action_stat last_prefetch_action;
 	/*
 	 * This is the limit on amount of *uncompressed* worth of data
 	 * we can store in a disk.
@@ -178,6 +200,10 @@ int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl);
 u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl);
 int zram_get_slot_snapshot(struct zram *zram, unsigned long index,
 			   struct zram_slot_snapshot *snapshot);
+void zram_action_begin(struct zram *zram, struct zram_action_stat *action,
+		       u32 source, u32 mode, u64 requested_pages, u64 before);
+void zram_action_finish(struct zram *zram, struct zram_action_stat *action,
+			int result, u64 after);
 
 #ifdef CONFIG_ZRAM_ANDROID_IOCTL
 void zram_prefetch_cache_init(struct zram *zram);
