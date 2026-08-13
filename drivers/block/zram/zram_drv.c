@@ -22,6 +22,7 @@
 #include <linux/blkdev.h>
 #include <linux/buffer_head.h>
 #include <linux/device.h>
+#include <linux/errno.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
 #include <linux/backing-dev.h>
@@ -140,12 +141,27 @@ void zram_action_begin(struct zram *zram, struct zram_action_stat *action,
 	next.before = before;
 	next.pid = task_pid_nr(current);
 	next.uid = __kuid_val(current_uid());
+	next.result = -EINPROGRESS;
 	next.source = source;
 	next.mode = mode;
 	get_task_comm(next.comm, current);
 
 	spin_lock_irqsave(&zram->action_lock, flags);
 	*action = next;
+	spin_unlock_irqrestore(&zram->action_lock, flags);
+}
+
+static void zram_actions_reset(struct zram *zram)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&zram->action_lock, flags);
+	memset(&zram->last_writeback_action, 0,
+	       sizeof(zram->last_writeback_action));
+	memset(&zram->last_recompress_action, 0,
+	       sizeof(zram->last_recompress_action));
+	memset(&zram->last_prefetch_action, 0,
+	       sizeof(zram->last_prefetch_action));
 	spin_unlock_irqrestore(&zram->action_lock, flags);
 }
 
@@ -3273,6 +3289,7 @@ static void zram_reset_device(struct zram *zram)
 	zram->disksize = 0;
 	zram_destroy_comps(zram);
 	memset(&zram->stats, 0, sizeof(zram->stats));
+	zram_actions_reset(zram);
 	atomic_set(&zram->pp_in_progress, 0);
 	reset_bdev(zram);
 
