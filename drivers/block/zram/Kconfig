@@ -148,7 +148,8 @@ config ZRAM_ANDROID_IOCTL
 	depends on ZRAM_WRITEBACK
 	help
 	  Expose the versioned Android zram ioctl ABI used for pidfd-targeted
-	  process writeback and prefetch. The operations require CAP_SYS_NICE.
+	  process writeback, prefetch, and bounded slot-state attribution.
+	  The operations require CAP_SYS_NICE.
 
 config KCOMPRESSD
 	tristate "Kcompressd: Accelerated zram compression"

@@ -891,7 +891,7 @@ int zram_prefetch_cache_reuse(struct zram *zram, u32 index)
 	if (ret)
 		return ret;
 
-	zram_clear_flag(zram, index, ZRAM_IDLE);
+	/* Keep the original idle state if prefetch did not access the page. */
 	if (zram_test_flag(zram, index, ZRAM_HUGE))
 		atomic64_dec(&zram->stats.huge_pages);
 	atomic64_sub(zram_get_obj_size(zram, index),
@@ -1073,7 +1073,11 @@ static int zram_writeback_complete(struct zram *zram,
 	unsigned int size = 0;
 	u32 prio = 0;
 	bool huge = false;
+	bool idle = false;
 	bool incompressible = false;
+#ifdef CONFIG_ZRAM_MEMORY_TRACKING
+	ktime_t access_time = 0;
+#endif
 	int err;
 
 	err = blk_status_to_errno(req->bio.bi_status);
@@ -1094,6 +1098,7 @@ static int zram_writeback_complete(struct zram *zram,
 		goto out;
 	}
 
+	idle = zram_test_flag(zram, index, ZRAM_IDLE);
 	if (zram->compressed_wb) {
 		size = zram_get_obj_size(zram, index);
 		prio = zram_get_priority(zram, index);
@@ -1101,10 +1106,19 @@ static int zram_writeback_complete(struct zram *zram,
 		incompressible = zram_test_flag(zram, index,
 						 ZRAM_INCOMPRESSIBLE);
 	}
+#ifdef CONFIG_ZRAM_MEMORY_TRACKING
+	access_time = zram->table[index].ac_time;
+#endif
 
 	zram_free_page(zram, index);
 	zram_set_flag(zram, index, ZRAM_WB);
 	zram_set_handle(zram, index, req->blk_idx);
+#ifdef CONFIG_ZRAM_MEMORY_TRACKING
+	/* Preserve age across the RAM-to-backing representation change. */
+	zram->table[index].ac_time = access_time;
+#endif
+	if (idle)
+		zram_set_flag(zram, index, ZRAM_IDLE);
 	if (zram->compressed_wb) {
 		zram_set_obj_size(zram, index, size);
 		zram_set_priority(zram, index, prio);
@@ -1440,6 +1454,37 @@ int zram_scan_slot_for_prefetch(struct zram *zram, unsigned long index,
 unlock:
 	zram_slot_unlock(zram, index);
 	return selected ? 0 : -ENOMEM;
+}
+
+int zram_get_slot_snapshot(struct zram *zram, unsigned long index,
+			   struct zram_slot_snapshot *snapshot)
+{
+	if (!snapshot || index >= (zram->disksize >> PAGE_SHIFT))
+		return -EINVAL;
+
+	zram_slot_lock(zram, index);
+	if (!zram_allocated(zram, index)) {
+		zram_slot_unlock(zram, index);
+		return -ENOENT;
+	}
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	snapshot->object_size = zram_get_obj_size(zram, index);
+	snapshot->comp_priority = zram_get_priority(zram, index);
+	snapshot->same = zram_test_flag(zram, index, ZRAM_SAME);
+	snapshot->writeback = zram_test_flag(zram, index, ZRAM_WB);
+	snapshot->huge = zram_test_flag(zram, index, ZRAM_HUGE);
+	snapshot->idle = zram_test_flag(zram, index, ZRAM_IDLE);
+	snapshot->incompressible =
+		zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+	snapshot->prefetched_backing =
+		zram_prefetch_cache_exists(zram, index);
+#ifdef CONFIG_ZRAM_MEMORY_TRACKING
+	snapshot->access_time_ns = ktime_to_ns(zram->table[index].ac_time);
+#endif
+	zram_slot_unlock(zram, index);
+
+	return 0;
 }
 
 u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl)

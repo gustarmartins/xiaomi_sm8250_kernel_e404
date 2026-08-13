@@ -152,6 +152,18 @@ struct zram {
 struct zram_pp_ctl;
 struct zram_wb_ctl;
 
+struct zram_slot_snapshot {
+	u64 access_time_ns;
+	u32 object_size;
+	u32 comp_priority;
+	bool same;
+	bool writeback;
+	bool huge;
+	bool idle;
+	bool incompressible;
+	bool prefetched_backing;
+};
+
 struct zram_pp_ctl *zram_pp_ctl_alloc(void);
 void zram_pp_ctl_free(struct zram *zram, struct zram_pp_ctl *ctl);
 struct zram_wb_ctl *zram_wb_ctl_alloc(struct zram *zram);
@@ -164,6 +176,8 @@ int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 			 struct zram_wb_ctl *wb_ctl);
 int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl);
 u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl);
+int zram_get_slot_snapshot(struct zram *zram, unsigned long index,
+			   struct zram_slot_snapshot *snapshot);
 
 #ifdef CONFIG_ZRAM_ANDROID_IOCTL
 void zram_prefetch_cache_init(struct zram *zram);
