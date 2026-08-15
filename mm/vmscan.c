@@ -1815,17 +1815,26 @@ int isolate_lru_page(struct page *page)
 	VM_BUG_ON_PAGE(!page_count(page), page);
 	WARN_RATELIMIT(PageTail(page), "trying to isolate tail page");
 
-	if (TestClearPageLRU(page)) {
+	/*
+	 * This 4.19 tree still serializes every LRU list with the node-wide
+	 * lru_lock.  Do not clear PageLRU before taking that lock: a concurrent
+	 * reclaim/putback transition can temporarily own page->lru, and deleting
+	 * it afterwards can dereference LIST_POISON.  This is also the locking
+	 * contract used by Android Common 5.10 for external page isolation.
+	 */
+	if (PageLRU(page)) {
 		struct zone *zone = page_zone(page);
 		struct lruvec *lruvec;
 
-		get_page(page);
-		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
-
 		spin_lock_irq(zone_lru_lock(zone));
-		del_page_from_lru_list(page, lruvec);
+		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
+		if (PageLRU(page)) {
+			get_page(page);
+			ClearPageLRU(page);
+			del_page_from_lru_list(page, lruvec);
+			ret = 0;
+		}
 		spin_unlock_irq(zone_lru_lock(zone));
-		ret = 0;
 	}
 
 	return ret;
