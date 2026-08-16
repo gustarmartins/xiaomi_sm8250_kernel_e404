@@ -600,6 +600,8 @@ struct zone {
 	unsigned long watermark_boost;
 
 	unsigned long nr_reserved_highatomic;
+	/* Free pages currently present on MIGRATE_HIGHATOMIC buddy lists. */
+	unsigned long nr_free_highatomic;
 
 	/*
 	 * We don't know if the memory that we're going to allocate will be

@@ -701,6 +701,27 @@ void prep_compound_page(struct page *page, unsigned int order)
 	atomic_set(compound_mapcount_ptr(page), -1);
 }
 
+/*
+ * nr_reserved_highatomic describes pageblock policy, not usable free memory.
+ * A reserved pageblock can be completely occupied, so keep an exact count of
+ * pages which are actually present on MIGRATE_HIGHATOMIC buddy lists.  All
+ * callers update buddy lists while holding zone->lock.
+ *
+ * This is the 4.19 accounting equivalent of upstream commit c928807f6f6b
+ * ("mm/page_alloc: keep track of free highatomic").
+ */
+static inline void account_free_highatomic(struct zone *zone, int nr_pages,
+					   int migratetype)
+{
+	lockdep_assert_held(&zone->lock);
+
+	if (!is_migrate_highatomic(migratetype))
+		return;
+
+	WRITE_ONCE(zone->nr_free_highatomic,
+		   zone->nr_free_highatomic + nr_pages);
+}
+
 #ifdef CONFIG_DEBUG_PAGEALLOC
 unsigned int _debug_guardpage_minorder;
 bool _debug_pagealloc_enabled __read_mostly
@@ -776,9 +797,11 @@ static inline bool set_page_guard(struct zone *zone, struct page *page,
 	__set_bit(PAGE_EXT_DEBUG_GUARD, &page_ext->flags);
 
 	INIT_LIST_HEAD(&page->lru);
+	set_pcppage_migratetype(page, migratetype);
 	set_page_private(page, order);
 	/* Guard pages are not available for any usage */
 	__mod_zone_freepage_state(zone, -(1 << order), migratetype);
+	account_free_highatomic(zone, -(1 << order), migratetype);
 
 	return true;
 }
@@ -798,8 +821,11 @@ static inline void clear_page_guard(struct zone *zone, struct page *page,
 	__clear_bit(PAGE_EXT_DEBUG_GUARD, &page_ext->flags);
 
 	set_page_private(page, 0);
-	if (!is_migrate_isolate(migratetype))
+	if (!is_migrate_isolate(migratetype)) {
 		__mod_zone_freepage_state(zone, (1 << order), migratetype);
+		account_free_highatomic(zone, 1 << order,
+					get_pcppage_migratetype(page));
+	}
 }
 #else
 struct page_ext_operations debug_guardpage_ops;
@@ -954,17 +980,22 @@ static inline void __free_one_page(struct page *page,
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
 
 	VM_BUG_ON(migratetype == -1);
-	if (likely(!is_migrate_isolate(migratetype)))
+	if (likely(!is_migrate_isolate(migratetype))) {
 		__mod_zone_freepage_state(zone, 1 << order, migratetype);
+		account_free_highatomic(zone, 1 << order, migratetype);
+	}
 
 	VM_BUG_ON_PAGE(pfn & ((1 << order) - 1), page);
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
 
 continue_merging:
 	while (order < max_order) {
+		int buddy_mt;
+
 		if (compaction_capture(capc, page, order, migratetype)) {
 			__mod_zone_freepage_state(zone, -(1 << order),
 								migratetype);
+			account_free_highatomic(zone, -(1 << order), migratetype);
 			return;
 		}
 
@@ -975,17 +1006,22 @@ continue_merging:
 			goto done_merging;
 		if (!page_is_buddy(page, buddy, order))
 			goto done_merging;
+		buddy_mt = get_pcppage_migratetype(buddy);
 		/*
 		 * Our buddy is free or it is CONFIG_DEBUG_PAGEALLOC guard page,
 		 * merge with it and move up one order.
 		 */
 		if (page_is_guard(buddy)) {
-			clear_page_guard(zone, buddy, order, migratetype);
+			clear_page_guard(zone, buddy, order, buddy_mt);
 		} else {
 			list_del(&buddy->lru);
 			zone->free_area[order].nr_free--;
 			rmv_page_order(buddy);
 		}
+
+		/* The merged block is placed on migratetype's list. */
+		account_free_highatomic(zone, -(1 << order), buddy_mt);
+		account_free_highatomic(zone, 1 << order, migratetype);
 		combined_pfn = buddy_pfn & pfn;
 		page = page + (combined_pfn - pfn);
 		pfn = combined_pfn;
@@ -1018,6 +1054,7 @@ continue_merging:
 
 done_merging:
 	set_page_order(page, order);
+	set_pcppage_migratetype(page, migratetype);
 
 	/*
 	 * If this is not the largest possible page, check if the buddy
@@ -1998,6 +2035,7 @@ static inline void expand(struct zone *zone, struct page *page,
 		if (set_page_guard(zone, &page[size], high, migratetype))
 			continue;
 
+		set_pcppage_migratetype(&page[size], migratetype);
 		list_add(&page[size].lru, &area->free_list[migratetype]);
 		area->nr_free++;
 		set_page_order(&page[size], high);
@@ -2145,6 +2183,7 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 		rmv_page_order(page);
 		area->nr_free--;
 		expand(zone, page, order, current_order, area, migratetype);
+		account_free_highatomic(zone, -(1 << order), migratetype);
 		set_pcppage_migratetype(page, migratetype);
 		return page;
 	}
@@ -2235,6 +2274,10 @@ static int move_freepages(struct zone *zone,
 		order = page_order(page);
 		list_move(&page->lru,
 			  &zone->free_area[order].free_list[migratetype]);
+		account_free_highatomic(zone, -(1 << order),
+					get_pcppage_migratetype(page));
+		account_free_highatomic(zone, 1 << order, migratetype);
+		set_pcppage_migratetype(page, migratetype);
 		page += 1 << order;
 		pages_moved += 1 << order;
 	}
@@ -2457,6 +2500,10 @@ static void steal_suitable_fallback(struct zone *zone, struct page *page,
 single_page:
 	area = &zone->free_area[current_order];
 	list_move(&page->lru, &area->free_list[start_type]);
+	account_free_highatomic(zone, -(1 << current_order),
+					get_pcppage_migratetype(page));
+	account_free_highatomic(zone, 1 << current_order, start_type);
+	set_pcppage_migratetype(page, start_type);
 }
 
 /*
@@ -3206,6 +3253,8 @@ int __isolate_free_page(struct page *page, unsigned int order)
 			return 0;
 
 		__mod_zone_freepage_state(zone, -(1UL << order), mt);
+		account_free_highatomic(zone, -(1UL << order),
+					get_pcppage_migratetype(page));
 	}
 
 	/* Remove page from free list */
@@ -3472,11 +3521,10 @@ static inline long __zone_watermark_unusable_free(struct zone *z,
 
 	/*
 	 * If the caller does not have rights to ALLOC_HARDER then subtract
-	 * the high-atomic reserves. This will over-estimate the size of the
-	 * atomic reserve but it avoids a search.
+	 * only pages which are actually free in the high-atomic reserve.
 	 */
 	if (likely(!alloc_harder))
-		unusable_free += z->nr_reserved_highatomic;
+		unusable_free += READ_ONCE(z->nr_free_highatomic);
 
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
@@ -5506,7 +5554,8 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 			" free_pcp:%lukB"
 			" local_pcp:%ukB"
 			" free_cma:%lukB"
-			" highatomic:%lukB"
+			" reserved_highatomic:%lukB"
+			" free_highatomic:%lukB"
 			"\n",
 			zone->name,
 			K(zone_page_state(zone, NR_FREE_PAGES)),
@@ -5531,7 +5580,8 @@ void show_free_areas(unsigned int filter, nodemask_t *nodemask)
 			K(free_pcp),
 			K(this_cpu_read(zone->pageset->pcp.count)),
 			K(zone_page_state(zone, NR_FREE_CMA_PAGES)),
-			K(zone->nr_reserved_highatomic));
+			K(zone->nr_reserved_highatomic),
+			K(READ_ONCE(zone->nr_free_highatomic)));
 		printk("lowmem_reserve[]:");
 		for (i = 0; i < MAX_NR_ZONES; i++)
 			printk(KERN_CONT " %ld", zone->lowmem_reserve[i]);
@@ -8668,6 +8718,8 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 			pfn, 1 << order, end_pfn);
 #endif
 		list_del(&page->lru);
+		account_free_highatomic(zone, -(1 << order),
+					get_pcppage_migratetype(page));
 		rmv_page_order(page);
 		zone->free_area[order].nr_free--;
 		for (i = 0; i < (1 << order); i++)
