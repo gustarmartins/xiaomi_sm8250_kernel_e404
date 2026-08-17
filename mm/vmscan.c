@@ -4375,11 +4375,14 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 
 	/*
 	 * The return value is a forward-progress signal, not scan accounting.
-	 * Returning a nonzero value after only sorting or skipping pages makes
-	 * direct reclaim immediately rescan the same unreclaimable working set.
-	 * The dedicated counters above retain the complete scan cost.
+	 * A full bounded batch can consist entirely of pages promoted by
+	 * sort_page(); that is useful progress because the next batch can reach
+	 * colder pages.  A short batch with no isolation, however, stopped on
+	 * ineligible/skipped pages and must terminate this reclaim pass instead
+	 * of immediately rescanning the same working set.  This is the Android
+	 * 5.15 rule adapted to K29's explicit nr_to_scan budget.
 	 */
-	return isolated ? scanned : 0;
+	return isolated || scanned >= nr_to_scan ? scanned : 0;
 }
 
 static int get_tier_idx(struct lruvec *lruvec, int type)
