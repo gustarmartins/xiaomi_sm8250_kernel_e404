@@ -2985,12 +2985,15 @@ static bool should_skip_mm(struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 	if (size < MIN_LRU_BATCH)
 		return true;
 
-	if (mm_is_oom_victim(mm))
-		return true;
-
-	mmgrab(mm);
-
-	return false;
+	/*
+	 * Hold an mm_users reference, not only mm_count.  mmgrab() keeps the
+	 * descriptor allocated after the last user exits, but it does not stop
+	 * __mmput() from entering exit_mmap() and tearing down page tables while
+	 * MGLRU is preparing to walk them.  This matches the maintained Android
+	 * 5.15 walker lifetime contract and makes an exiting address space
+	 * ineligible for a new aging walk.
+	 */
+	return !mmget_not_zero(mm);
 }
 
 static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
@@ -3013,9 +3016,6 @@ static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
 	 * 3. It ended the current iteration: it needs to reset the mm stats
 	 *    counters and tell its caller to increment max_seq.
 	 */
-	if (*iter)
-		mmdrop(*iter);
-
 	spin_lock(&mm_list->lock);
 
 	VM_BUG_ON(mm_state->seq + 1 < walk->max_seq);
@@ -3055,6 +3055,10 @@ done:
 		reset_bloom_filter(lruvec, walk->max_seq + 1);
 
 	spin_unlock(&mm_list->lock);
+
+	/* __mmput() can sleep and may run exit_mmap(); never do it under mm_list. */
+	if (*iter)
+		mmput_async(*iter);
 
 	*iter = mm;
 
@@ -3830,6 +3834,12 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 
 	VM_BUG_ON(max_seq > READ_ONCE(lrugen->max_seq));
+
+	/* See iterate_mm_list(): this generation was already walked. */
+	if (max_seq <= READ_ONCE(lruvec->mm_state.seq)) {
+		success = false;
+		goto done;
+	}
 
 	/*
 	 * If the hardware doesn't automatically set the accessed bit, fallback
