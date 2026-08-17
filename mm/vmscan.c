@@ -4373,7 +4373,13 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	*nr_taken = isolated;
 
-	return scanned;
+	/*
+	 * The return value is a forward-progress signal, not scan accounting.
+	 * Returning a nonzero value after only sorting or skipping pages makes
+	 * direct reclaim immediately rescan the same unreclaimable working set.
+	 * The dedicated counters above retain the complete scan cost.
+	 */
+	return isolated ? scanned : 0;
 }
 
 static int get_tier_idx(struct lruvec *lruvec, int type)
@@ -4620,31 +4626,61 @@ done:
 }
 
 static bool should_abort_lru_gen_scan(struct lruvec *lruvec,
+				      unsigned long seq,
 				      struct scan_control *sc,
-				      unsigned long reclaimed)
+				      unsigned long reclaimed,
+				      bool need_swapping)
 {
 	int i;
+	DEFINE_MAX_SEQ(lruvec);
 
-	/* Memcg reclaim must keep its normal fairness semantics. */
-	if (!global_reclaim(sc))
+	if (!current_is_kswapd()) {
+		/* Bound page-table aging performed by one direct reclaimer. */
+		if (max_seq - seq > 1)
+			return true;
+
+		/* Stop extending allocation latency once swap met the target. */
+		if (sc->nr_reclaimed - reclaimed >= sc->nr_to_reclaim &&
+		    need_swapping)
+			return true;
+
+		if (fatal_signal_pending(current)) {
+			sc->nr_reclaimed += MIN_LRU_BATCH;
+			return true;
+		}
+
+		/* Memcg reclaim retains its normal fairness semantics. */
+		if (!global_reclaim(sc))
+			return false;
+	} else if (sc->nr_reclaimed - reclaimed < sc->nr_to_reclaim) {
 		return false;
+	}
 
 	if (sc->nr_reclaimed - reclaimed >=
 	    max(sc->nr_to_reclaim, compact_gap(sc->order)))
 		return true;
 
-	/* High-watermark stopping is for order-0 kswapd, not compaction. */
-	if (!current_is_kswapd() || sc->order)
+	/* Keep scanning at high priorities so all lruvecs get a fair chance. */
+	if (sc->priority > DEF_PRIORITY - 2)
 		return false;
 
 	for (i = 0; i <= sc->reclaim_idx; i++) {
 		struct zone *zone = lruvec_pgdat(lruvec)->node_zones + i;
-		unsigned long mark = high_wmark_pages(zone) + MIN_LRU_BATCH;
+		unsigned long mark;
 
-		if (managed_zone(zone) &&
-		    !zone_watermark_ok(zone, 0, mark, sc->reclaim_idx, 0))
+		if (!managed_zone(zone))
+			continue;
+
+		mark = current_is_kswapd() ? high_wmark_pages(zone) :
+						 low_wmark_pages(zone);
+
+		if (mark > zone_page_state(zone, NR_FREE_PAGES))
 			return false;
 	}
+
+	/* Make the outer direct-reclaim loop observe this safe stopping point. */
+	if (!current_is_kswapd())
+		sc->nr_reclaimed += MIN_LRU_BATCH;
 
 	return true;
 }
@@ -4657,6 +4693,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 	bool swapped = false;
 	unsigned long reclaimed = sc->nr_reclaimed;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+	DEFINE_MAX_SEQ(lruvec);
 
 	lru_add_drain();
 
@@ -4693,7 +4730,8 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		scanned += delta;
 		if (scanned >= nr_to_scan)
 			break;
-		if (should_abort_lru_gen_scan(lruvec, sc, reclaimed))
+		if (should_abort_lru_gen_scan(lruvec, max_seq, sc, reclaimed,
+					       swapped))
 			break;
 
 		cond_resched();
