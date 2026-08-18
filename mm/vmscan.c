@@ -3722,25 +3722,56 @@ static void free_mm_walk(struct lru_gen_mm_walk *walk)
 		kfree(walk);
 }
 
-static void inc_min_seq(struct lruvec *lruvec)
+static bool inc_min_seq(struct lruvec *lruvec, int type, bool can_swap)
 {
-	int type;
+	int zone;
+	int remaining = MAX_LRU_BATCH;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
+	int new_gen, old_gen = lru_gen_from_seq(lrugen->min_seq[type]);
 
 	VM_BUG_ON(!seq_is_valid(lruvec));
 
-	for (type = 0; type < ANON_AND_FILE; type++) {
-		if (get_nr_gens(lruvec, type) != MAX_NR_GENS)
-			continue;
+	if (type == LRU_GEN_ANON && !can_swap)
+		goto done;
 
-		reset_ctrl_pos(lruvec, type, true);
-		WRITE_ONCE(lrugen->min_seq[type], lrugen->min_seq[type] + 1);
+	/*
+	 * max_seq + 1 reuses an existing list. Move any pages left in the
+	 * generation being retired before that list becomes the new youngest
+	 * generation; otherwise cold pages and freshly aged pages are mixed.
+	 * Keep the work bounded because this runs while holding pgdat->lru_lock.
+	 */
+	for (zone = 0; zone < MAX_NR_ZONES; zone++) {
+		struct list_head *head = &lrugen->lists[old_gen][type][zone];
+
+		while (!list_empty(head)) {
+			struct page *page = lru_to_page(head);
+
+			VM_BUG_ON_PAGE(PageTail(page), page);
+			VM_BUG_ON_PAGE(PageUnevictable(page), page);
+			VM_BUG_ON_PAGE(PageActive(page), page);
+			VM_BUG_ON_PAGE(page_is_file_cache(page) != type, page);
+			VM_BUG_ON_PAGE(page_zonenum(page) != zone, page);
+
+			new_gen = page_inc_gen(lruvec, page, false);
+			list_move_tail(&page->lru,
+				       &lrugen->lists[new_gen][type][zone]);
+
+			if (!--remaining)
+				return false;
+		}
 	}
+
+done:
+	reset_ctrl_pos(lruvec, type, true);
+	WRITE_ONCE(lrugen->min_seq[type], lrugen->min_seq[type] + 1);
+
+	return true;
 }
 
-static void try_to_inc_min_seq(struct lruvec *lruvec, bool can_swap)
+static bool try_to_inc_min_seq(struct lruvec *lruvec, bool can_swap)
 {
 	int gen, type, zone;
+	bool success = false;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	DEFINE_MIN_SEQ(lruvec);
 
@@ -3773,28 +3804,44 @@ next:
 
 		reset_ctrl_pos(lruvec, type, true);
 		WRITE_ONCE(lrugen->min_seq[type], min_seq[type]);
+		success = true;
 	}
+
+	return success;
 }
 
-static void inc_max_seq(struct lruvec *lruvec)
+static void inc_max_seq(struct lruvec *lruvec, bool can_swap, bool full_scan)
 {
 	int prev, next;
 	int type, zone;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
+restart:
 	spin_lock_irq(&pgdat->lru_lock);
 
 	VM_BUG_ON(!seq_is_valid(lruvec));
 
-	inc_min_seq(lruvec);
+	for (type = ANON_AND_FILE - 1; type >= 0; type--) {
+		if (get_nr_gens(lruvec, type) != MAX_NR_GENS)
+			continue;
+
+		VM_WARN_ON_ONCE(!full_scan &&
+				(type == LRU_GEN_FILE || can_swap));
+
+		if (inc_min_seq(lruvec, type, can_swap))
+			continue;
+
+		spin_unlock_irq(&pgdat->lru_lock);
+		cond_resched();
+		goto restart;
+	}
 
 	/*
 	 * Update the active/inactive LRU sizes for compatibility. Both sides of
 	 * the current max_seq need to be covered, since max_seq+1 can overlap
-	 * with min_seq[LRU_GEN_ANON] if swapping is constrained. And if they do
-	 * overlap, cold/hot inversion happens. This can be solved by moving
-	 * pages from min_seq to min_seq+1 but is omitted for simplicity.
+	 * with min_seq[LRU_GEN_ANON] if swapping is constrained. inc_min_seq()
+	 * prevents the cold/hot inversion before the list is reused.
 	 */
 	prev = lru_gen_from_seq(lrugen->max_seq - 1);
 	next = lru_gen_from_seq(lrugen->max_seq + 1);
@@ -3873,7 +3920,7 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 done:
 	if (success) {
 		VM_BUG_ON(max_seq != READ_ONCE(lrugen->max_seq));
-		inc_max_seq(lruvec);
+		inc_max_seq(lruvec, can_swap, full_scan);
 		wakeup_flusher_threads(WB_REASON_VMSCAN);
 	}
 
@@ -4506,6 +4553,7 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc,
 static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
 		       int nr_to_scan, int swappiness, bool *swapped)
 {
+	bool advanced;
 	int type;
 	int scanned;
 	int nr_scanned = 0;
@@ -4522,14 +4570,26 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
 	spin_lock_irq(&pgdat->lru_lock);
 
 	/* Flush empty oldest generations left behind by page deletion. */
-	try_to_inc_min_seq(lruvec, swappiness);
+	advanced = try_to_inc_min_seq(lruvec, swappiness);
 
 	scanned = isolate_pages(lruvec, sc, nr_to_scan, swappiness, &type,
 				&nr_taken, &nr_scanned, &list);
 
 	/* Scanning can empty another oldest generation. */
 	if (scanned)
-		try_to_inc_min_seq(lruvec, swappiness);
+		advanced |= try_to_inc_min_seq(lruvec, swappiness);
+
+	/*
+	 * Advancing past an empty oldest generation exposes the next eviction
+	 * candidate and therefore is forward progress even when this batch did
+	 * not isolate a page. Preserve that signal for one bounded retry.
+	 */
+	if (!scanned && advanced)
+		scanned = 1;
+
+	/* There is nothing old enough to evict until aging makes a new gen. */
+	if (get_nr_gens(lruvec, !swappiness) == MIN_NR_GENS)
+		scanned = 0;
 
 	spin_unlock_irq(&pgdat->lru_lock);
 
