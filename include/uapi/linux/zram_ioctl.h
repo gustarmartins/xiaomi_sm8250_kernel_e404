@@ -6,7 +6,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define ZRAM_ANDROID_IOC_VERSION 2
+#define ZRAM_ANDROID_IOC_VERSION 3
 
 struct zram_android_ioc_data_process_writeback {
 	__aligned_u64 pidfd;
@@ -30,6 +30,23 @@ struct zram_android_ioc_process_range_writeback {
 
 struct zram_android_ioc_process_prefetch {
 	__aligned_u64 pidfd;
+};
+
+/*
+ * Cursor-based process prefetch.  max_scan_bytes limits virtual address space
+ * examined by one call, not merely the amount of backing I/O selected.  This
+ * makes both the mmap lock work and the maximum possible I/O bounded.  A
+ * nonzero next_addr can be supplied as start_addr to continue the scan.
+ * prefetched_pages counts pages successfully restored into zram.
+ */
+struct zram_android_ioc_process_range_prefetch {
+	__aligned_u64 pidfd;
+	__u64 start_addr;
+	__u64 max_scan_bytes;
+	__u64 next_addr;
+	__u64 scanned_bytes;
+	__u64 prefetched_pages;
+	__u64 reserved[2];
 };
 
 /* Flags returned in struct zram_android_ioc_slot_record::flags. */
@@ -94,5 +111,8 @@ struct zram_android_ioc_process_range_query {
 #define ZRAM_ANDROID_IOC_PROCESS_RANGE_QUERY \
 	_IOWR(ZRAM_ANDROID_IOC_MAGIC, 5, \
 	      struct zram_android_ioc_process_range_query)
+#define ZRAM_ANDROID_IOC_PROCESS_RANGE_PREFETCH \
+	_IOWR(ZRAM_ANDROID_IOC_MAGIC, 6, \
+	      struct zram_android_ioc_process_range_prefetch)
 
 #endif /* _UAPI_LINUX_ZRAM_IOCTL_H */

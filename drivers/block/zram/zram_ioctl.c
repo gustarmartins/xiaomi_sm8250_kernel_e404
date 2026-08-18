@@ -28,6 +28,14 @@
 #define ZRAM_QUERY_MAX_SCAN_BYTES (256ULL << 20)
 #define ZRAM_QUERY_MAX_RECORDS 4096U
 
+struct zram_process_scan_range {
+	u64 start_addr;
+	/* Zero preserves the legacy whole-mm behavior. */
+	u64 max_scan_bytes;
+	u64 next_addr;
+	u64 scanned_bytes;
+};
+
 struct zram_process_walk_private {
 	struct zram *zram;
 	struct zram_pp_ctl *pp_ctl;
@@ -400,32 +408,28 @@ unlock_init:
 }
 
 static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
-		u64 pidfd, struct zram_android_ioc_process_range_writeback *range,
+		u64 pidfd, struct zram_process_scan_range *scan,
+		u64 nr_remaining_pages,
 		struct zram_pp_ctl *pp_ctl)
 {
 	struct zram_process_walk_private private = {
 		.zram = zram,
 		.pp_ctl = pp_ctl,
 		.cmd = cmd,
-		.nr_remaining_pages = NR_PAGES_UNLIMITED,
+		.nr_remaining_pages = nr_remaining_pages,
 	};
 	struct task_struct *task;
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	unsigned long cursor, start_addr;
+	u64 scanned = 0;
 	int ret = 0;
 
-	if (pidfd > UINT_MAX)
+	if (pidfd > UINT_MAX || scan->start_addr > ULONG_MAX)
 		return -EINVAL;
-	start_addr = 0;
-	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK &&
-	    range->start_addr > ULONG_MAX)
-		return -EINVAL;
-	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
-		start_addr = range->start_addr;
-	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK && range->size)
-		private.nr_remaining_pages =
-			DIV_ROUND_UP_ULL(range->size, PAGE_SIZE);
+	start_addr = scan->start_addr;
+	scan->next_addr = 0;
+	scan->scanned_bytes = 0;
 
 	task = zram_pidfd_get_task(pidfd);
 	if (IS_ERR(task))
@@ -445,31 +449,51 @@ static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
 	 * the VMA for every bounded chunk so munmap/exit can make progress between
 	 * chunks without retaining a stale linked-list VMA pointer.
 	 */
-	for (cursor = start_addr; cursor < mm->task_size; ) {
+	for (cursor = start_addr;
+	     cursor < mm->task_size &&
+	     (!scan->max_scan_bytes || scanned < scan->max_scan_bytes); ) {
 		unsigned long end, start;
+		u64 batch_bytes = ZRAM_WALK_BATCH_BYTES;
 
 		down_read(&mm->mmap_sem);
 		vma = find_vma(mm, cursor);
 		if (!vma) {
 			up_read(&mm->mmap_sem);
+			cursor = mm->task_size;
 			break;
 		}
 
 		start = max(vma->vm_start, cursor);
-		end = start + ZRAM_WALK_BATCH_BYTES;
+		if (scan->max_scan_bytes)
+			batch_bytes = min_t(u64, batch_bytes,
+					scan->max_scan_bytes - scanned);
+		end = start + batch_bytes;
 		if (end < start || end > vma->vm_end)
 			end = vma->vm_end;
 
 		if (!vma_is_anonymous(vma) &&
 		    (!can_do_file_pageout(vma) && (vma->vm_flags & VM_MAYSHARE))) {
-			cursor = vma->vm_end;
+			if (scan->max_scan_bytes) {
+				scanned += end - start;
+				cursor = end;
+			} else {
+				cursor = vma->vm_end;
+			}
 			up_read(&mm->mmap_sem);
 			cond_resched();
 			continue;
 		}
 
 		ret = walk_page_range(mm, start, end, &zram_walk_ops, &private);
-		cursor = end;
+		if (private.stopped) {
+			cursor = private.next_addr;
+			if (scan->max_scan_bytes)
+				scanned += private.next_addr - start;
+		} else {
+			cursor = end;
+			if (scan->max_scan_bytes)
+				scanned += end - start;
+		}
 		up_read(&mm->mmap_sem);
 		if (private.stopped) {
 			ret = 0;
@@ -480,8 +504,10 @@ static int zram_ioctl_process_scan(struct zram *zram, unsigned int cmd,
 		cond_resched();
 	}
 
-	if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK)
-		range->next_addr = private.stopped ? private.next_addr : 0;
+	scan->scanned_bytes = scanned;
+	if (!ret && cursor < mm->task_size &&
+	    (private.stopped || scan->max_scan_bytes))
+		scan->next_addr = cursor;
 put_mm:
 	mmput(mm);
 	return ret;
@@ -495,6 +521,9 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 	struct zram_wb_ctl *wb_ctl = NULL;
 	bool action_started = false;
 	u64 requested_pages;
+	struct zram_process_scan_range scan = {
+		.start_addr = range->start_addr,
+	};
 	int ret;
 
 	if (!capable(CAP_SYS_NICE))
@@ -533,9 +562,12 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 
 	ret = zram_ioctl_process_scan(zram,
 				      ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK,
-				      range->pidfd, range, pp_ctl);
+				      range->pidfd, &scan,
+				      requested_pages ?: NR_PAGES_UNLIMITED,
+				      pp_ctl);
 	if (!ret)
 		ret = zram_writeback_slots(zram, pp_ctl, wb_ctl);
+	range->next_addr = scan.next_addr;
 	range->written_bytes = zram_wb_processed_bytes(wb_ctl);
 
 clear_progress:
@@ -585,10 +617,86 @@ static int zram_ioctl_process_prefetch(struct zram *zram,
 			  atomic64_read(&zram->stats.bd_reads));
 	action_started = true;
 
-	ret = zram_ioctl_process_scan(zram, ZRAM_ANDROID_IOC_PROCESS_PREFETCH,
-				      prefetch->pidfd, NULL, pp_ctl);
+	{
+		struct zram_process_scan_range scan = { 0 };
+
+		ret = zram_ioctl_process_scan(zram,
+					      ZRAM_ANDROID_IOC_PROCESS_PREFETCH,
+					      prefetch->pidfd, &scan,
+					      NR_PAGES_UNLIMITED, pp_ctl);
+	}
 	if (!ret)
-		ret = zram_prefetch_slots(zram, pp_ctl);
+		ret = zram_prefetch_slots(zram, pp_ctl, NULL);
+
+clear_progress:
+	if (action_started)
+		zram_action_finish(zram, &zram->last_prefetch_action, ret,
+				   atomic64_read(&zram->stats.bd_reads));
+	zram_pp_ctl_free(zram, pp_ctl);
+	atomic_set(&zram->pp_in_progress, 0);
+unlock:
+	up_read(&zram->init_lock);
+	return ret;
+}
+
+static int zram_ioctl_process_range_prefetch(struct zram *zram,
+		struct zram_android_ioc_process_range_prefetch *range)
+{
+	struct zram_process_scan_range scan = {
+		.start_addr = range->start_addr,
+		.max_scan_bytes = range->max_scan_bytes,
+	};
+	struct zram_pp_ctl *pp_ctl = NULL;
+	bool action_started = false;
+	u64 before;
+	int ret;
+
+	if (!capable(CAP_SYS_NICE))
+		return -EPERM;
+	if (!range->max_scan_bytes ||
+	    range->max_scan_bytes > ZRAM_QUERY_MAX_SCAN_BYTES ||
+	    !IS_ALIGNED(range->max_scan_bytes, PAGE_SIZE))
+		return -EINVAL;
+
+	range->next_addr = 0;
+	range->scanned_bytes = 0;
+	range->prefetched_pages = 0;
+	memset(range->reserved, 0, sizeof(range->reserved));
+
+	down_read(&zram->init_lock);
+	if (!zram->disksize) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+	if (!zram->backing_dev) {
+		ret = -ENODEV;
+		goto unlock;
+	}
+	if (atomic_xchg(&zram->pp_in_progress, 1)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+
+	pp_ctl = zram_pp_ctl_alloc();
+	if (!pp_ctl) {
+		ret = -ENOMEM;
+		goto clear_progress;
+	}
+	before = atomic64_read(&zram->stats.bd_reads);
+	zram_action_begin(zram, &zram->last_prefetch_action, 2,
+			  ZRAM_ANDROID_IOC_PROCESS_RANGE_PREFETCH,
+			  range->max_scan_bytes >> PAGE_SHIFT, before);
+	action_started = true;
+
+	ret = zram_ioctl_process_scan(zram,
+				      ZRAM_ANDROID_IOC_PROCESS_RANGE_PREFETCH,
+				      range->pidfd, &scan,
+				      NR_PAGES_UNLIMITED, pp_ctl);
+	range->next_addr = scan.next_addr;
+	range->scanned_bytes = scan.scanned_bytes;
+	if (!ret)
+		ret = zram_prefetch_slots(zram, pp_ctl,
+					  &range->prefetched_pages);
 
 clear_progress:
 	if (action_started)
@@ -635,6 +743,14 @@ int zram_ioctl(struct block_device *bdev, fmode_t mode,
 		if (copy_from_user(&prefetch, argp, sizeof(prefetch)))
 			return -EFAULT;
 		ret = zram_ioctl_process_prefetch(zram, &prefetch);
+	} else if (cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_PREFETCH) {
+		struct zram_android_ioc_process_range_prefetch range;
+
+		if (copy_from_user(&range, argp, sizeof(range)))
+			return -EFAULT;
+		ret = zram_ioctl_process_range_prefetch(zram, &range);
+		if (copy_to_user(argp, &range, sizeof(range)))
+			ret = -EFAULT;
 	} else if (cmd == ZRAM_ANDROID_IOC_PROCESS_WRITEBACK) {
 		struct zram_android_ioc_process_range_writeback range = { 0 };
 		struct zram_android_ioc_data legacy;

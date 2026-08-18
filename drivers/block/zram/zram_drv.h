@@ -196,7 +196,8 @@ int zram_scan_slot_for_prefetch(struct zram *zram, unsigned long index,
 				struct zram_pp_ctl *ctl);
 int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 			 struct zram_wb_ctl *wb_ctl);
-int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl);
+int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl,
+			u64 *prefetched_pages);
 u64 zram_wb_processed_bytes(struct zram_wb_ctl *ctl);
 int zram_get_slot_snapshot(struct zram *zram, unsigned long index,
 			   struct zram_slot_snapshot *snapshot);
