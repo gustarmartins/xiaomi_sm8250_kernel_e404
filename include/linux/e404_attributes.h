@@ -8,11 +8,6 @@
 #include <linux/sysfs.h>
 #include <linux/sched.h>
 
-#define E404_BLOCKLIST_STRLEN 256
-#define E404_MAX_BLOCKED 16
-
-bool e404_comm_blocked(const char *comm);
-
 struct e404_attributes {
     int effcpu;
     int rom_type;
@@ -20,7 +15,6 @@ struct e404_attributes {
     int batt_profile;
     int kgsl_skip_zeroing;
     int file_sync;
-    char bg_blocklist[E404_BLOCKLIST_STRLEN];
 #ifdef CONFIG_BOARD_PIPA
     int panel_width_pipa;
     int panel_height_pipa;
