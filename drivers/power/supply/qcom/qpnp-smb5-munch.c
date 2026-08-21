@@ -3071,11 +3071,7 @@ static int smb5_batt_get_prop(struct power_supply *psy,
 		rc = smblib_get_prop_batt_charge_type(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
-		if (chg->ext_fg)
-			rc = smblib_get_prop_from_bms(chg,
-				 POWER_SUPPLY_PROP_CAPACITY_LEVEL, val);
-		else
-			rc = smblib_get_prop_batt_capacity_level(chg, val);
+		rc = smblib_get_prop_batt_capacity_level(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		rc = smblib_get_prop_batt_capacity(chg, val);

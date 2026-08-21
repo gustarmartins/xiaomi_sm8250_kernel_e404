@@ -2542,7 +2542,24 @@ int smblib_get_prop_batt_capacity_level(struct smb_charger *chg,
                                   union power_supply_propval *val)
 {
 	int rc, cap, input_present = INPUT_NOT_PRESENT;
+	int bms_level = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
+	bool input_online;
+	enum power_supply_property level_prop =
+		POWER_SUPPLY_PROP_CAPACITY_LEVEL;
 	union power_supply_propval capacity = { 0 };
+
+	/*
+	 * munch uses an external fuel gauge in production.  Preserve its
+	 * non-critical classifications.  Resolve a CRITICAL report through the
+	 * physical-input safety policy before exposing it to Android.
+	 */
+	if (chg->ext_fg) {
+		rc = smblib_get_prop_from_bms(chg, level_prop, val);
+		if (rc < 0 ||
+		    val->intval != POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL)
+			return rc;
+		bms_level = val->intval;
+	}
 
 	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CAPACITY,
 					&capacity);
@@ -2566,8 +2583,8 @@ int smblib_get_prop_batt_capacity_level(struct smb_charger *chg,
 			return rc;
 	}
 
-	val->intval = smb5_capacity_level_for_soc(cap,
-				input_present != INPUT_NOT_PRESENT);
+	input_online = input_present != INPUT_NOT_PRESENT;
+	val->intval = smb5_capacity_level_resolve(bms_level, cap, input_online);
 	return 0;
 }
 
