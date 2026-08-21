@@ -15,6 +15,7 @@
 #include <linux/of_batterydata.h>
 #include <linux/ktime.h>
 #include "smb5-lib-munch.h"
+#include "smb5-capacity-policy.h"
 #include "smb5-reg.h"
 #include "schgm-flash.h"
 #include "step-chg-jeita.h"
@@ -2540,23 +2541,34 @@ int smblib_get_prop_batt_capacity(struct smb_charger *chg,
 int smblib_get_prop_batt_capacity_level(struct smb_charger *chg,
                                   union power_supply_propval *val)
 {
-	int rc,cap;
-	union power_supply_propval capacity;
+	int rc, cap, input_present = INPUT_NOT_PRESENT;
+	union power_supply_propval capacity = { 0 };
 
-	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CAPACITY, &capacity);
+	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CAPACITY,
+					&capacity);
+	if (rc < 0)
+		return rc;
 
-	cap=capacity.intval;
-	if (cap == 0)
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
-	if (cap > 0 && cap <= 20)
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_LOW;
-	if (cap > 20 && cap <= 80)
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
-	if (cap > 80 && cap <= 99)
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_HIGH;
-	if (cap == 100)
-		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
-	return rc;
+	cap = capacity.intval;
+	if (cap < 0 || cap > 100)
+		return -ERANGE;
+
+	/*
+	 * Android 16 treats CAPACITY_LEVEL_CRITICAL as an unconditional
+	 * shutdown request, even when the charger status is CHARGING. During
+	 * attach/negotiation a worn pack can transiently report zero percent
+	 * while USB or DC is already physically present. Keep that state LOW;
+	 * the PMIC remains the final authority if input cannot sustain the rail.
+	 */
+	if (cap == 0) {
+		rc = smblib_is_input_present(chg, &input_present);
+		if (rc < 0)
+			return rc;
+	}
+
+	val->intval = smb5_capacity_level_for_soc(cap,
+				input_present != INPUT_NOT_PRESENT);
+	return 0;
 }
 
 static bool is_charging_paused(struct smb_charger *chg)
