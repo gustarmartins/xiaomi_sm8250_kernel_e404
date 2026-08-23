@@ -239,13 +239,18 @@ struct usbpd_pm {
 
 	struct delayed_work pm_work;
 	struct delayed_work fc2_exit_work;
+	struct workqueue_struct *wq;
+
+	/* PD/charge-pump liveness state. */
+	unsigned int recovery_delay_ms;
+	unsigned int transient_fault_recoveries;
+	unsigned int stale_pps_rearms;
+	bool terminal_exit;
 
 	struct notifier_block nb;
 
-	bool psy_change_running;
 	struct work_struct cp_psy_change_work;
 	struct work_struct usb_psy_change_work;
-	spinlock_t psy_change_lock;
 
 	struct votable *fcc_votable;
 	struct power_supply *cp_psy;

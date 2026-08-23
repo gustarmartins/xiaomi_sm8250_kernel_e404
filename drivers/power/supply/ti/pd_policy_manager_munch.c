@@ -53,6 +53,8 @@
 #define PM_WORK_RUN_NORMAL_INTERVAL 500
 #define PM_WORK_RUN_QUICK_INTERVAL 200
 #define PM_WORK_RUN_CRITICAL_INTERVAL 100
+#define PM_WORK_RUN_FAULT_RECOVERY_INTERVAL 5000
+#define PM_WORK_RUN_STALE_REARM_INTERVAL 1000
 int pd_log_count_poussin = 0;
 
 enum {
@@ -1354,6 +1356,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 	case PD_PM_STATE_ENTRY:
 		stop_sw = false;
 		recover = false;
+		pdpm->terminal_exit = false;
 
 		usbpd_pm_check_night_charging_enabled(pdpm);
 		/* update new fcc from bms charge current */
@@ -1386,6 +1389,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			pr_err("batt_volt %d is too high for cp,\
 					charging with switch charger\n",
 			       pdpm->cp.vbat_volt);
+			pdpm->terminal_exit = true;
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 		} else if (!pd_get_bms_digest_verified(pdpm)) {
 			pr_err("bms digest is not verified, waiting...\n");
@@ -1400,6 +1404,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 		} else if (pdpm->cp_sec_enable &&
 			   !pdpm->cp_sec.batt_connecter_present) {
 			pr_err("sec batt connecter miss! charging with switch charger\n");
+			pdpm->terminal_exit = true;
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 		} else {
 			pr_err("batt_volt-%d is ok, start flash charging\n",
@@ -1463,6 +1468,14 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 
 		if (tune_vbus_retry > 80) {
 			pr_err("Failed to tune adapter volt into valid range, charge with switching charger\n");
+			recover = true;
+			pdpm->recovery_delay_ms =
+				PM_WORK_RUN_FAULT_RECOVERY_INTERVAL;
+			pdpm->transient_fault_recoveries++;
+			dev_warn_ratelimited(pdpm->dev,
+				"PPS voltage tuning failed; recovery #%u in %u ms\n",
+				pdpm->transient_fault_recoveries,
+				pdpm->recovery_delay_ms);
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 		}
 		break;
@@ -1538,6 +1551,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 		if (ret == PM_ALGO_RET_THERM_FAULT) {
 			pr_info("Move to stop charging:%d\n", ret);
 			stop_sw = true;
+			pdpm->terminal_exit = true;
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 			break;
 		} else if (usbpd_get_current_state(pdpm->pd) == 1) {
@@ -1550,10 +1564,28 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			usbpd_pm_evaluate_src_caps(pdpm);
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_ENTRY_1);
 			break;
-		} else if (ret == PM_ALGO_RET_OTHER_FAULT ||
-			   ret == PM_ALGO_RET_TAPER_DONE ||
+		} else if (ret == PM_ALGO_RET_OTHER_FAULT) {
+			/*
+			 * A transient charge-pump or gauge fault used to share
+			 * the terminal path with taper completion. That stopped
+			 * pm_work while pd_active remained verified, so a short
+			 * PD reset under memory pressure could strand the phone
+			 * on 5 V until reboot.
+			 */
+			recover = true;
+			pdpm->recovery_delay_ms =
+				PM_WORK_RUN_FAULT_RECOVERY_INTERVAL;
+			pdpm->transient_fault_recoveries++;
+			dev_warn_ratelimited(pdpm->dev,
+				"transient PPS fault; recovery #%u in %u ms\n",
+				pdpm->transient_fault_recoveries,
+				pdpm->recovery_delay_ms);
+			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
+			break;
+		} else if (ret == PM_ALGO_RET_TAPER_DONE ||
 			   ret == PM_ALGO_RET_UNSUPPORT_PPSTA) {
 			pr_err("Move to switch charging:%d\n", ret);
+			pdpm->terminal_exit = true;
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 			break;
 		} else if (ret == PM_ALGO_RET_CHG_DISABLED) {
@@ -1571,6 +1603,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			if (pdpm->chip_ok_count++ > 2) {
 				pr_err("bms chip ok is not ready, exit\n");
 				pdpm->chip_ok_count = 0;
+				pdpm->terminal_exit = true;
 				usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 			}
 		} else {
@@ -1685,7 +1718,12 @@ static void usbpd_pm_workfunc(struct work_struct *work)
 			internal = PM_WORK_RUN_QUICK_INTERVAL;
 		else
 			internal = PM_WORK_RUN_NORMAL_INTERVAL;
-		queue_delayed_work(system_power_efficient_wq, &pdpm->pm_work,
+		if (pdpm->recovery_delay_ms) {
+			internal = max_t(int, internal,
+					 pdpm->recovery_delay_ms);
+			pdpm->recovery_delay_ms = 0;
+		}
+		queue_delayed_work(pdpm->wq, &pdpm->pm_work,
 				      msecs_to_jiffies(internal));
 	}
 }
@@ -1720,6 +1758,9 @@ static void usbpd_pm_disconnect(struct usbpd_pm *pdpm)
 	pdpm->slave_bq_disabled_check_count = 0;
 	pdpm->master_ibus_below_critical_low_count = 0;
 	pdpm->chip_ok_count = 0;
+	pdpm->recovery_delay_ms = 0;
+	pdpm->transient_fault_recoveries = 0;
+	pdpm->terminal_exit = false;
 	memset(&pdpm->pdo, 0, sizeof(pdpm->pdo));
 	pm_config.bat_curr_lp_lmt = pdpm->bat_curr_max;
 	pm_config.bat_volt_lp_lmt = pdpm->bat_volt_max;
@@ -1738,7 +1779,7 @@ static void usbpd_pd_contact(struct usbpd_pm *pdpm, int status)
 	if (status) {
 		usbpd_pm_evaluate_src_caps(pdpm);
 		if (pdpm->pps_supported)
-			queue_delayed_work(system_power_efficient_wq, &pdpm->pm_work, 0);
+			queue_delayed_work(pdpm->wq, &pdpm->pm_work, 0);
 	} else {
 		usbpd_pm_disconnect(pdpm);
 	}
@@ -1751,7 +1792,7 @@ static void usbpd_pps_non_verified_contact(struct usbpd_pm *pdpm, int status)
 	if (status) {
 		usbpd_pm_evaluate_src_caps(pdpm);
 		if (pdpm->pps_supported)
-			queue_delayed_work(system_power_efficient_wq, &pdpm->pm_work, 5 * HZ);
+			queue_delayed_work(pdpm->wq, &pdpm->pm_work, 5 * HZ);
 	} else {
 		usbpd_pm_disconnect(pdpm);
 		if (pdpm->fcc_votable)
@@ -1761,24 +1802,8 @@ static void usbpd_pps_non_verified_contact(struct usbpd_pm *pdpm, int status)
 
 static void cp_psy_change_work(struct work_struct *work)
 {
-	struct usbpd_pm *pdpm =
-		container_of(work, struct usbpd_pm, cp_psy_change_work);
-#if 0
-	union power_supply_propval val = {0,};
-	bool ac_pres = pdpm->cp.vbus_pres;
-	int ret;
-
-	if (!pdpm->cp_psy)
-		return;
-
-	ret = power_supply_get_property(pdpm->cp_psy, POWER_SUPPLY_PROP_TI_VBUS_PRESENT, &val);
-	if (!ret)
-		pdpm->cp.vbus_pres = val.intval;
-
-	if (!ac_pres && pdpm->cp.vbus_pres)
-		queue_delayed_work(system_power_efficient_wq, &pdpm->pm_work, 0);
-#endif
-	pdpm->psy_change_running = false;
+	/* Charge-pump changes are coalesced for future policy use. */
+	(void)work;
 }
 
 static void usb_psy_change_work(struct work_struct *work)
@@ -1840,9 +1865,28 @@ static void usb_psy_change_work(struct work_struct *work)
 		if (pdpm->fcc_votable)
 			vote(pdpm->fcc_votable, NON_PPS_PD_FCC_VOTER, true,
 			     NON_PPS_PD_FCC_LIMIT);
+	} else if (pdpm->pd_active == POWER_SUPPLY_PPS_VERIFIED &&
+		   val.intval == POWER_SUPPLY_PD_PPS_ACTIVE &&
+		   pd_auth_val.intval == 1 &&
+		   pdpm->state == PD_PM_STATE_FC2_EXIT &&
+		   !pdpm->terminal_exit &&
+		   !delayed_work_pending(&pdpm->pm_work)) {
+		/*
+		 * Heavy PSI can collapse a detach/reconnect pair into one
+		 * final power-supply update. If authenticated PPS survived
+		 * but pm_work did not, re-evaluate from ENTRY rather than
+		 * requiring a reboot.
+		 */
+		pdpm->stale_pps_rearms++;
+		usbpd_pm_move_state(pdpm, PD_PM_STATE_ENTRY);
+		queue_delayed_work(pdpm->wq, &pdpm->pm_work,
+			msecs_to_jiffies(PM_WORK_RUN_STALE_REARM_INTERVAL));
+		dev_warn_ratelimited(pdpm->dev,
+			"rearmed stale authenticated PPS session #%u\n",
+			pdpm->stale_pps_rearms);
 	}
 out:
-	pdpm->psy_change_running = false;
+	return;
 }
 
 static int usbpd_psy_notifier_cb(struct notifier_block *nb, unsigned long event,
@@ -1850,7 +1894,6 @@ static int usbpd_psy_notifier_cb(struct notifier_block *nb, unsigned long event,
 {
 	struct usbpd_pm *pdpm = container_of(nb, struct usbpd_pm, nb);
 	struct power_supply *psy = data;
-	unsigned long flags;
 
 	if (event != PSY_EVENT_PROP_CHANGED)
 		return NOTIFY_OK;
@@ -1863,15 +1906,15 @@ static int usbpd_psy_notifier_cb(struct notifier_block *nb, unsigned long event,
 		return NOTIFY_OK;
 
 	if (psy == pdpm->cp_psy || psy == pdpm->usb_psy) {
-		spin_lock_irqsave(&pdpm->psy_change_lock, flags);
-		if (!pdpm->psy_change_running) {
-			pdpm->psy_change_running = true;
-			if (psy == pdpm->cp_psy)
-				schedule_work(&pdpm->cp_psy_change_work);
-			else
-				schedule_work(&pdpm->usb_psy_change_work);
-		}
-		spin_unlock_irqrestore(&pdpm->psy_change_lock, flags);
+		/*
+		 * Workqueue pending bits coalesce duplicates without losing
+		 * the other power-supply source or a change that arrives while
+		 * a work item is executing.
+		 */
+		if (psy == pdpm->cp_psy)
+			queue_work(pdpm->wq, &pdpm->cp_psy_change_work);
+		else
+			queue_work(pdpm->wq, &pdpm->usb_psy_change_work);
 	}
 
 	return NOTIFY_OK;
@@ -1994,12 +2037,10 @@ static int usbpd_pm_probe(struct platform_device *pdev)
 	ret = pd_policy_parse_dt(pdpm);
 	if (ret < 0) {
 		pr_err("Couldn't parse device tree rc=%d\n", ret);
-		return ret;
+		goto err_free;
 	}
 
 	platform_set_drvdata(pdev, pdpm);
-
-	spin_lock_init(&pdpm->psy_change_lock);
 
 	usbpd_check_cp_psy(pdpm);
 	usbpd_check_cp_sec_psy(pdpm);
@@ -2012,10 +2053,25 @@ static int usbpd_pm_probe(struct platform_device *pdev)
 	INIT_WORK(&pdpm->cp_psy_change_work, cp_psy_change_work);
 	INIT_WORK(&pdpm->usb_psy_change_work, usb_psy_change_work);
 	INIT_DELAYED_WORK(&pdpm->pm_work, usbpd_pm_workfunc);
+	pdpm->wq = alloc_ordered_workqueue("usbpd_pm", WQ_MEM_RECLAIM);
+	if (!pdpm->wq) {
+		ret = -ENOMEM;
+		goto err_free;
+	}
 
 	pdpm->nb.notifier_call = usbpd_psy_notifier_cb;
-	power_supply_reg_notifier(&pdpm->nb);
+	ret = power_supply_reg_notifier(&pdpm->nb);
+	if (ret)
+		goto err_destroy_wq;
 
+	return 0;
+
+err_destroy_wq:
+	destroy_workqueue(pdpm->wq);
+err_free:
+	platform_set_drvdata(pdev, NULL);
+	__pdpm = NULL;
+	kfree(pdpm);
 	return ret;
 }
 
@@ -2025,6 +2081,10 @@ static int usbpd_pm_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&__pdpm->pm_work);
 	cancel_work_sync(&__pdpm->cp_psy_change_work);
 	cancel_work_sync(&__pdpm->usb_psy_change_work);
+	destroy_workqueue(__pdpm->wq);
+	kfree(__pdpm);
+	__pdpm = NULL;
+	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
