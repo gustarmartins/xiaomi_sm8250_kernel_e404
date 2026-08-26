@@ -959,8 +959,25 @@ static int madvise_inject_error(int behavior,
 #endif
 
 static long
-madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
-		unsigned long start, unsigned long end, int behavior)
+madvise_populate(struct task_struct *task, struct vm_area_struct *vma,
+		 struct vm_area_struct **prev, unsigned long start,
+		 unsigned long end, int behavior)
+{
+	long pages;
+
+	*prev = vma;
+	pages = faultin_vma_page_range(task, vma, start, end,
+				       behavior == MADV_POPULATE_WRITE);
+	if (pages < 0)
+		return pages;
+
+	return pages == (end - start) / PAGE_SIZE ? 0 : -ENOMEM;
+}
+
+static long
+madvise_vma(struct task_struct *task, struct vm_area_struct *vma,
+	    struct vm_area_struct **prev, unsigned long start,
+	    unsigned long end, int behavior)
 {
 	switch (behavior) {
 	case MADV_REMOVE:
@@ -971,6 +988,9 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		return madvise_cold(vma, prev, start, end);
 	case MADV_PAGEOUT:
 		return madvise_pageout(vma, prev, start, end);
+	case MADV_POPULATE_READ:
+	case MADV_POPULATE_WRITE:
+		return madvise_populate(task, vma, prev, start, end, behavior);
 	case MADV_FREE:
 	case MADV_DONTNEED:
 		return madvise_dontneed_free(vma, prev, start, end, behavior);
@@ -994,6 +1014,8 @@ madvise_behavior_valid(int behavior)
 	case MADV_FREE:
 	case MADV_COLD:
 	case MADV_PAGEOUT:
+	case MADV_POPULATE_READ:
+	case MADV_POPULATE_WRITE:
 #ifdef CONFIG_KSM
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
@@ -1024,6 +1046,7 @@ process_madvise_behavior_valid(int behavior)
 	case MADV_COLD:
 	case MADV_PAGEOUT:
 	case MADV_WILLNEED:
+	case MADV_POPULATE_READ:
 		return true;
 	default:
 		return false;
@@ -1082,6 +1105,8 @@ process_madvise_behavior_valid(int behavior)
  *		easily if memory pressure hanppens.
  *  MADV_PAGEOUT - the application is not expected to use this memory soon,
  *		page out the pages in this range immediately.
+ *  MADV_POPULATE_READ - populate readable page tables synchronously.
+ *  MADV_POPULATE_WRITE - populate writable page tables synchronously.
  *
  * return values:
  *  zero    - success
@@ -1096,7 +1121,8 @@ process_madvise_behavior_valid(int behavior)
  *  -EBADF  - map exists, but area maps something that isn't a file.
  *  -EAGAIN - a kernel resource was temporarily unavailable.
  */
-int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int behavior)
+static int do_madvise_task(struct task_struct *task, struct mm_struct *mm,
+			   unsigned long start, size_t len_in, int behavior)
 {
 	unsigned long end, tmp;
 	struct vm_area_struct *vma, *prev;
@@ -1187,7 +1213,7 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 			tmp = end;
 
 		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
-		error = madvise_vma(vma, &prev, start, tmp, behavior);
+		error = madvise_vma(task, vma, &prev, start, tmp, behavior);
 		if (error)
 			goto out;
 		start = tmp;
@@ -1209,6 +1235,12 @@ out:
 		up_read(&mm->mmap_sem);
 
 	return error;
+}
+
+int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in,
+	       int behavior)
+{
+	return do_madvise_task(current, mm, start, len_in, behavior);
 }
 
 SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
@@ -1275,8 +1307,8 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 
 	while (iov_iter_count(&iter)) {
 		iovec = iov_iter_iovec(&iter);
-		ret = do_madvise(mm, (unsigned long)iovec.iov_base,
-					iovec.iov_len, behavior);
+		ret = do_madvise_task(task, mm, (unsigned long)iovec.iov_base,
+				      iovec.iov_len, behavior);
 		if (ret < 0)
 			break;
 		iov_iter_advance(&iter, iovec.iov_len);

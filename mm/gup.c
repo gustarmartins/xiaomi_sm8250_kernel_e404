@@ -1321,6 +1321,33 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 }
 
 /*
+ * Fault a range without pinning it. Unlike MADV_WILLNEED, this installs
+ * present PTEs and can therefore provide an explicit remote fault-in action.
+ */
+long faultin_vma_page_range(struct task_struct *task,
+			    struct vm_area_struct *vma, unsigned long start,
+			    unsigned long end, bool write)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long nr_pages = (end - start) / PAGE_SIZE;
+	unsigned int gup_flags = FOLL_TOUCH | FOLL_POPULATE;
+
+	VM_BUG_ON(start & ~PAGE_MASK);
+	VM_BUG_ON(end & ~PAGE_MASK);
+	VM_BUG_ON_VMA(start < vma->vm_start, vma);
+	VM_BUG_ON_VMA(end > vma->vm_end, vma);
+	VM_BUG_ON_MM(!rwsem_is_locked(&mm->mmap_sem), mm);
+
+	if (write)
+		gup_flags |= FOLL_WRITE;
+	if (task != current || mm != current->mm)
+		gup_flags |= FOLL_REMOTE;
+
+	return __get_user_pages(task, mm, start, nr_pages, gup_flags,
+				NULL, NULL, NULL);
+}
+
+/*
  * __mm_populate - populate and/or mlock pages within a range of address space.
  *
  * This is used to implement mlock() and the MAP_POPULATE / MAP_LOCKED mmap

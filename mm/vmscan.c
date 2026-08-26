@@ -97,6 +97,9 @@ struct scan_control {
 	/* Proactive reclaim invoked by userspace through memory.reclaim */
 	unsigned int proactive:1;
 
+	/* Optional swappiness override for one proactive reclaim request. */
+	int *proactive_swappiness;
+
 	/* e.g. boosted watermark reclaim leaves slabs alone */
 	unsigned int may_shrinkslab:1;
 
@@ -331,6 +334,14 @@ static inline bool memcg_congested(struct pglist_data *pgdat,
 
 }
 #endif
+
+static int sc_swappiness(struct scan_control *sc, struct mem_cgroup *memcg)
+{
+	if (sc->proactive && sc->proactive_swappiness)
+		return *sc->proactive_swappiness;
+
+	return mem_cgroup_swappiness(memcg);
+}
 
 /*
  * This misses isolated pages which are not accounted for to save counters.
@@ -2448,7 +2459,7 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 			   struct scan_control *sc, unsigned long *nr,
 			   unsigned long *lru_pages)
 {
-	int swappiness = mem_cgroup_swappiness(memcg);
+	int swappiness = sc_swappiness(sc, memcg);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 	u64 fraction[ANON_AND_FILE];
 	u64 denominator = 0;	/* gcc */
@@ -2474,6 +2485,12 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 */
 	if (!global_reclaim(sc) && !swappiness) {
 		scan_balance = SCAN_FILE;
+		goto out;
+	}
+
+	if (swappiness == SWAPPINESS_ANON_ONLY) {
+		WARN_ON_ONCE(!sc->proactive);
+		scan_balance = SCAN_ANON;
 		goto out;
 	}
 
@@ -2716,7 +2733,7 @@ static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 	if (mem_cgroup_get_nr_swap_pages(memcg) < MIN_LRU_BATCH)
 		return 0;
 
-	return mem_cgroup_swappiness(memcg);
+	return sc_swappiness(sc, memcg);
 }
 
 static int get_nr_gens(struct lruvec *lruvec, int type)
@@ -4510,6 +4527,8 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc,
 	 */
 	if (!swappiness)
 		type = LRU_GEN_FILE;
+	else if (swappiness == SWAPPINESS_ANON_ONLY)
+		type = LRU_GEN_ANON;
 	else if (min_seq[LRU_GEN_ANON] < min_seq[LRU_GEN_FILE])
 		type = LRU_GEN_ANON;
 	else if (swappiness == 1)
@@ -4523,7 +4542,9 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc,
 	*nr_scanned = 0;
 	*type_scanned = type;
 
-	for (i = !swappiness; i < ANON_AND_FILE; i++) {
+	for (i = !swappiness;
+	     i < (swappiness == SWAPPINESS_ANON_ONLY ? 1 : ANON_AND_FILE);
+	     i++) {
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
@@ -6398,7 +6419,8 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 					   unsigned long nr_pages,
 					   gfp_t gfp_mask,
-					   unsigned int reclaim_options)
+					   unsigned int reclaim_options,
+					   int *swappiness)
 {
 	struct zonelist *zonelist;
 	unsigned long nr_reclaimed;
@@ -6416,6 +6438,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.may_unmap = 1,
 		.may_swap = !!(reclaim_options & MEMCG_RECLAIM_MAY_SWAP),
 		.proactive = !!(reclaim_options & MEMCG_RECLAIM_PROACTIVE),
+		.proactive_swappiness = swappiness,
 		.may_shrinkslab = 1,
 	};
 
