@@ -4449,14 +4449,14 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 
 	/*
 	 * The return value is a forward-progress signal, not scan accounting.
-	 * A full bounded batch can consist entirely of pages promoted by
-	 * sort_page(); that is useful progress because the next batch can reach
-	 * colder pages.  A short batch with no isolation, however, stopped on
-	 * ineligible/skipped pages and must terminate this reclaim pass instead
-	 * of immediately rescanning the same working set.  This is the Android
-	 * 5.15 rule adapted to K29's explicit nr_to_scan budget.
+	 * A sorted page was only promoted within the MGLRU lists; it was not
+	 * reclaimed and must not make direct reclaim immediately rescan this
+	 * working set.  K50 treated a full sorted-only batch as progress, which
+	 * can turn a 4.19 direct-reclaim pass into a repeated scan storm.  Keep
+	 * the K49 rule: only an isolation batch is forward progress.  The
+	 * dedicated counters above retain the complete scan cost.
 	 */
-	return isolated || scanned >= nr_to_scan ? scanned : 0;
+	return isolated ? scanned : 0;
 }
 
 static int get_tier_idx(struct lruvec *lruvec, int type)
