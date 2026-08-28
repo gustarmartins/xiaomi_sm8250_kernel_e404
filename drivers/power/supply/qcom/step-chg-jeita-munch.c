@@ -594,19 +594,29 @@ static int get_val(struct range_data *range, int hysteresis, int current_index,
 static void taper_fcc_step_chg(struct step_chg_info *chip, int index,
 					int current_voltage)
 {
-	u32 current_fcc, target_fcc;
-	u32 current_debug;
-	union power_supply_propval pval = {0, };
-	int pps_max_watts = 0;
+	int current_fcc, target_fcc;
 	if (index < 0) {
 		pr_err("Invalid STEP CHG index\n");
 		return;
 	}
-	power_supply_get_property(chip->usb_psy, POWER_SUPPLY_PROP_APDO_MAX, &pval);
-	pps_max_watts = pval.intval;
-	power_supply_get_property(chip->bms_psy, POWER_SUPPLY_PROP_CAPACITY, &pval);
 	current_fcc = get_effective_result(chip->fcc_votable);
 	target_fcc = chip->step_chg_config->fcc_cfg[index].value;
+	if (current_fcc <= 0) {
+		/*
+		 * get_effective_result() returns a negative errno when no FCC
+		 * client is active.  Keeping this value unsigned made the taper
+		 * subtraction wrap and cast an ever more negative STEP_CHG vote,
+		 * which could permanently prevent PPS charge-pump entry.
+		 *
+		 * The current step configuration is the authoritative fallback
+		 * once its index has been validated, so seed that vote directly.
+		 */
+		dev_warn_ratelimited(chip->dev,
+			"invalid effective FCC %d, restoring step target %d\n",
+			current_fcc, target_fcc);
+		vote(chip->fcc_votable, STEP_CHG_VOTER, true, target_fcc);
+		return;
+	}
 
 	/*if (pps_max_watts >= 40) {// for 67w pd
 		if (pval.intval>= TAPERED_STEP_SOC_90 && target_fcc >= TAPERED_STEP_SOC_FCC_90_67W)
@@ -636,10 +646,8 @@ static void taper_fcc_step_chg(struct step_chg_info *chip, int index,
 		 * control parameter exceeds the high threshold of previous
 		 * step charging index configuration.
 		 */
-		vote(chip->fcc_votable, STEP_CHG_VOTER, true, max(target_fcc,
+		vote(chip->fcc_votable, STEP_CHG_VOTER, true, max_t(int, target_fcc,
 			current_fcc - TAPERED_STEP_CHG_FCC_REDUCTION_STEP_MA));
-		current_debug = current_fcc - TAPERED_STEP_CHG_FCC_REDUCTION_STEP_MA;
-		pr_err("fcc_votable_CV %d-%d-%d\n",current_fcc, target_fcc,current_debug);
 	} else if ((current_fcc >
 		chip->step_chg_config->fcc_cfg[index - 1].value) &&
 		(current_voltage >
@@ -651,10 +659,8 @@ static void taper_fcc_step_chg(struct step_chg_info *chip, int index,
 		 * down FCC till previous index FCC configuration is reached.
 		 */
 		vote(chip->fcc_votable, STEP_CHG_VOTER, true,
-			max(chip->step_chg_config->fcc_cfg[index - 1].value,
+			max_t(int, chip->step_chg_config->fcc_cfg[index - 1].value,
 			current_fcc - TAPERED_STEP_CHG_FCC_REDUCTION_STEP_MA));
-		current_debug = current_fcc - TAPERED_STEP_CHG_FCC_REDUCTION_STEP_MA;
-		pr_err("fcc_votable_CV1 %d-%d-%d\n",current_fcc, chip->step_chg_config->fcc_cfg[index - 1].value,current_debug);
 	}
 }
 
@@ -673,13 +679,19 @@ static int handle_step_chg_config(struct step_chg_info *chip)
 		pr_err("Get battery present status failed, rc=%d\n", rc);
 		return rc;
 	}
-	if (pval.intval && pval.intval != usb_present)
+	if (pval.intval != usb_present) {
 		update_now = true;
+		if (pval.intval)
+			chip->step_index = 0;
+		else if (chip->fcc_votable)
+			vote(chip->fcc_votable, STEP_CHG_VOTER, false, 0);
+	}
 	usb_present = pval.intval;
 
 	elapsed_us = ktime_us_delta(ktime_get(), chip->step_last_update_time);
 	/* skip processing, event too early */
-	if (elapsed_us < STEP_CHG_HYSTERISIS_DELAY_US && !update_now)
+	if ((elapsed_us < STEP_CHG_HYSTERISIS_DELAY_US && !update_now) ||
+	    !usb_present)
 		return 0;
 
 	rc = power_supply_get_property(chip->batt_psy,
