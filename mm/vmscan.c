@@ -3416,7 +3416,9 @@ restart:
 			continue;
 		}
 
-		VM_BUG_ON(!pfn_valid(pfn));
+		/* A racing/special mapping must never turn reclaim into a BUG. */
+		if (WARN_ON_ONCE(!pfn_valid(pfn)))
+			continue;
 		if (pfn < pgdat->node_start_pfn || pfn >= pgdat_end_pfn(pgdat))
 			continue;
 
@@ -3507,7 +3509,9 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long next, struct vm_area
 			goto next;
 		}
 
-		VM_BUG_ON(!pfn_valid(pfn));
+		/* A racing/special mapping must never turn reclaim into a BUG. */
+		if (WARN_ON_ONCE(!pfn_valid(pfn)))
+			goto next;
 		if (pfn < pgdat->node_start_pfn || pfn >= pgdat_end_pfn(pgdat))
 			goto next;
 
@@ -3549,8 +3553,8 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long next, struct vm_area
 }
 #endif
 
-static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
-			   struct mm_walk *walk)
+static bool walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
+			   struct mm_walk *walk, unsigned long *resume)
 {
 	int i;
 	pmd_t *pmd;
@@ -3573,6 +3577,19 @@ restart:
 	vma = walk->vma;
 	i = (start >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
 	for (addr = start; addr != end; i++, addr = next) {
+		/*
+		 * A PUD spans 1 GiB on arm64.  If its PMDs contain no young
+		 * entries, the page-table batch counter alone may never trip.  Do
+		 * not keep mmap_read_lock() across an unbounded PMD loop; resume at
+		 * the current PMD on the next walk_page_range() pass.
+		 */
+		if (need_resched() || priv->batched >= MAX_LRU_BATCH) {
+			/* Do not drop a pending PMD-lock batch on an early yield. */
+			walk_pmd_range_locked(pud, -1, vma, walk, &pos);
+			*resume = addr;
+			return true;
+		}
+
 		pmd_t val = pmd_read_atomic(pmd + i);
 
 		/* for pmd_read_atomic() */
@@ -3629,12 +3646,15 @@ restart:
 
 		/* carry over to the next generation */
 		update_bloom_filter(priv->lruvec, priv->max_seq + 1, pmd + i);
+
 	}
 
 	walk_pmd_range_locked(pud, -1, vma, walk, &pos);
 
 	if (i < PTRS_PER_PMD && get_next_vma(walk, PUD_MASK, PMD_SIZE, &start, &end))
 		goto restart;
+
+	return false;
 }
 
 static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
@@ -3644,6 +3664,7 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
 	pud_t *pud;
 	unsigned long addr;
 	unsigned long next;
+	unsigned long resume;
 	struct lru_gen_mm_walk *priv = walk->private;
 
 	pud = pud_offset(p4d, start & P4D_MASK);
@@ -3657,7 +3678,10 @@ restart:
 		if (!pud_present(val) || WARN_ON_ONCE(pud_trans_huge(val) || pud_devmap(val)))
 			continue;
 
-		walk_pmd_range(&val, addr, next, walk);
+		if (walk_pmd_range(&val, addr, next, walk, &resume)) {
+			end = resume;
+			goto done;
+		}
 
 		/*
 		 * A large address space can span many PMDs before the batch cap is
@@ -4222,7 +4246,9 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 		if (!pte_young(pte[i]))
 			continue;
 
-		VM_BUG_ON(!pfn_valid(pfn));
+		/* A racing/special mapping must never turn reclaim into a BUG. */
+		if (WARN_ON_ONCE(!pfn_valid(pfn)))
+			continue;
 		if (pfn < pgdat->node_start_pfn || pfn >= pgdat_end_pfn(pgdat))
 			continue;
 
