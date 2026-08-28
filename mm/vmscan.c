@@ -357,14 +357,6 @@ unsigned long zone_reclaimable_pages(struct zone *zone)
 	if (get_nr_swap_pages() > 0)
 		nr += zone_page_state_snapshot(zone, NR_ZONE_INACTIVE_ANON) +
 			zone_page_state_snapshot(zone, NR_ZONE_ACTIVE_ANON);
-	/*
-	 * A zone can still contribute free pages even when both reclaimable
-	 * LRU classes are empty.  Do not let the reclaim/compaction callers
-	 * skip such a zone (notably a DMA/DMA32 zone) solely because its LRU
-	 * counters are zero.
-	 */
-	if (!nr)
-		nr = zone_page_state_snapshot(zone, NR_FREE_PAGES);
 
 	return nr;
 }
