@@ -2712,12 +2712,17 @@ static struct lruvec *get_lruvec(struct mem_cgroup *memcg, int nid)
 static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 {
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+	int swappiness = sc_swappiness(sc, memcg);
+
+	/* Preserve the anonymous-only mode until reclaim can handle no swap. */
+	if (swappiness == SWAPPINESS_ANON_ONLY)
+		return swappiness;
 
 	/* Keep swapping available until the memcg has actually exhausted it. */
 	if (mem_cgroup_get_nr_swap_pages(memcg) <= 0)
 		return 0;
 
-	return sc_swappiness(sc, memcg);
+	return swappiness;
 }
 
 static int get_nr_gens(struct lruvec *lruvec, int type)
@@ -4716,14 +4721,21 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
 	return scanned;
 }
 
-static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc, bool can_swap,
-			   unsigned long reclaimed, bool *need_aging)
+static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc,
+			   int swappiness, unsigned long reclaimed,
+			   bool *need_aging)
 {
+	bool can_swap = swappiness;
 	int priority;
 	long nr_to_scan;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	DEFINE_MAX_SEQ(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
+
+	/* Anonymous-only reclaim cannot progress after swap is exhausted. */
+	if (swappiness == SWAPPINESS_ANON_ONLY &&
+	    mem_cgroup_get_nr_swap_pages(memcg) <= 0)
+		return 0;
 
 	nr_to_scan = get_nr_evictable(lruvec, max_seq, min_seq, can_swap, need_aging);
 	if (!nr_to_scan)
