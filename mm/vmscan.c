@@ -4781,64 +4781,51 @@ done:
 	return min_seq[!can_swap] + MIN_NR_GENS <= max_seq ? nr_to_scan : 0;
 }
 
-static bool should_abort_lru_gen_scan(struct lruvec *lruvec,
-				      unsigned long seq,
-				      struct scan_control *sc,
-				      unsigned long reclaimed,
-				      bool need_swapping)
+static bool should_abort_lru_gen_reclaim(struct pglist_data *pgdat,
+					 struct scan_control *sc)
 {
 	int i;
-	DEFINE_MAX_SEQ(lruvec);
 
-	if (!current_is_kswapd()) {
-		/* Bound page-table aging performed by one direct reclaimer. */
-		if (max_seq - seq > 1)
-			return true;
-
-		/* Stop extending allocation latency once swap met the target. */
-		if (sc->nr_reclaimed - reclaimed >= sc->nr_to_reclaim &&
-		    need_swapping)
-			return true;
-
-		if (fatal_signal_pending(current)) {
-			sc->nr_reclaimed += MIN_LRU_BATCH;
-			return true;
-		}
-
-		/* Memcg reclaim retains its normal fairness semantics. */
-		if (!global_reclaim(sc))
-			return false;
-	} else if (sc->nr_reclaimed - reclaimed < sc->nr_to_reclaim) {
+	/* Memcg reclaim retains its normal fairness semantics. */
+	if (!global_reclaim(sc))
 		return false;
-	}
 
-	if (sc->nr_reclaimed - reclaimed >=
+	if (!current_is_kswapd() && fatal_signal_pending(current))
+		return true;
+
+	/* The target is global across lruvecs, not per memcg. */
+	if (sc->nr_reclaimed >=
 	    max(sc->nr_to_reclaim, compact_gap(sc->order)))
 		return true;
 
-	/* Keep scanning at high priorities so all lruvecs get a fair chance. */
-	if (sc->priority > DEF_PRIORITY - 2)
+	/* High-watermark stopping is for order-0 kswapd, not compaction. */
+	if (!current_is_kswapd() || sc->order)
 		return false;
 
 	for (i = 0; i <= sc->reclaim_idx; i++) {
-		struct zone *zone = lruvec_pgdat(lruvec)->node_zones + i;
-		unsigned long mark;
+		struct zone *zone = pgdat->node_zones + i;
+		unsigned long mark = high_wmark_pages(zone) + MIN_LRU_BATCH;
 
-		if (!managed_zone(zone))
-			continue;
-
-		mark = current_is_kswapd() ? high_wmark_pages(zone) :
-						 low_wmark_pages(zone);
-
-		if (mark > zone_page_state(zone, NR_FREE_PAGES))
+		if (managed_zone(zone) &&
+		    !zone_watermark_ok(zone, 0, mark, sc->reclaim_idx, 0))
 			return false;
 	}
 
-	/* Make the outer direct-reclaim loop observe this safe stopping point. */
-	if (!current_is_kswapd())
-		sc->nr_reclaimed += MIN_LRU_BATCH;
-
+	/* Kswapd should abort if all eligible zones are safe. */
 	return true;
+}
+
+static bool should_abort_lru_gen_scan(struct lruvec *lruvec,
+				      unsigned long seq,
+				      struct scan_control *sc)
+{
+	DEFINE_MAX_SEQ(lruvec);
+
+	/* Bound page-table aging performed by one direct reclaimer. */
+	if (!current_is_kswapd() && max_seq - seq > 1)
+		return true;
+
+	return should_abort_lru_gen_reclaim(lruvec_pgdat(lruvec), sc);
 }
 
 static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
@@ -4899,8 +4886,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		scanned += delta;
 		if (scanned >= nr_to_scan)
 			break;
-		if (should_abort_lru_gen_scan(lruvec, max_seq, sc, reclaimed,
-					       swapped))
+		if (should_abort_lru_gen_scan(lruvec, max_seq, sc))
 			break;
 
 		cond_resched();
@@ -5614,6 +5600,12 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 {
 }
 
+static bool should_abort_lru_gen_reclaim(struct pglist_data *pgdat,
+					 struct scan_control *sc)
+{
+	return false;
+}
+
 #endif /* CONFIG_LRU_GEN */
 
 /*
@@ -5902,6 +5894,18 @@ static bool shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 					   sc->nr_scanned - scanned,
 					   sc->nr_reclaimed - reclaimed,
 					   sc->order);
+
+			/*
+			 * The classic outer loop predates MGLRU's memcg LRU. Stop
+			 * the complete global pass once its aggregate target or
+			 * kswapd high-watermark condition is satisfied; otherwise
+			 * each app cgroup can reclaim the target independently.
+			 */
+			if (lru_gen_enabled() && !lru_gen_switching() &&
+			    should_abort_lru_gen_reclaim(pgdat, sc)) {
+				mem_cgroup_iter_break(root, memcg);
+				break;
+			}
 
 			/*
 			 * Direct reclaim and kswapd have to scan all memory
