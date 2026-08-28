@@ -6743,6 +6743,20 @@ int smblib_set_prop_pd_current_max(struct smb_charger *chg,
 	int rc, icl;
 
 	if (chg->pd_active) {
+		/*
+		 * APSD/type-detection may restore its conservative ICL votes while
+		 * an explicit PD contract remains active.  PD_CURRENT_MAX is the
+		 * authoritative contract update, so restore exclusive PD ownership
+		 * before publishing the negotiated current.
+		 */
+		rc = vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
+		if (rc < 0)
+			return rc;
+
+		rc = vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, false, 0);
+		if (rc < 0)
+			return rc;
+
 		icl = get_client_vote(chg->usb_icl_votable, PD_VOTER);
 		rc = vote(chg->usb_icl_votable, PD_VOTER, true, val->intval);
 		if (val->intval != icl)
@@ -7147,8 +7161,23 @@ int smblib_set_prop_pd_active(struct smb_charger *chg,
 	 * Ignore repetitive notification while PD is active, which
 	 * is caused by hard reset.
 	 */
-	if (chg->pd_active && chg->pd_active == val->intval)
+	if (chg->pd_active && chg->pd_active == val->intval) {
+		/*
+		 * A repeated active notification is also a resynchronization point:
+		 * a detach/hard-reset race can have reinstated the 100 mA APSD vote
+		 * without changing chg->pd_active.
+		 */
+		rc = vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
+		if (rc < 0)
+			return rc;
+
+		rc = vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, false, 0);
+		if (rc < 0)
+			return rc;
+
+		rerun_election(chg->usb_icl_votable);
 		return 0;
+	}
 
 	chg->pd_active = val->intval;
 
