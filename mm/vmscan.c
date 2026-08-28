@@ -3563,6 +3563,7 @@ static bool walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 	struct vm_area_struct *vma;
 	unsigned long pos = -1;
 	struct lru_gen_mm_walk *priv = walk->private;
+	pmd_t val;
 
 	VM_BUG_ON(pud_trans_huge(*pud) || pud_devmap(*pud));
 
@@ -3590,7 +3591,7 @@ restart:
 			return true;
 		}
 
-		pmd_t val = pmd_read_atomic(pmd + i);
+		val = pmd_read_atomic(pmd + i);
 
 		/* for pmd_read_atomic() */
 		barrier();
