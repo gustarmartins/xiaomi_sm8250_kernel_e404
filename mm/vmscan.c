@@ -51,6 +51,7 @@
 #include <linux/dax.h>
 #include <linux/psi.h>
 #include <linux/memory.h>
+#include <linux/mmu_notifier.h>
 #include <linux/pagewalk.h>
 #include <linux/pagevec.h>
 #include <linux/shmem_fs.h>
@@ -3431,7 +3432,7 @@ restart:
 		if (page_memcg_rcu(page) != memcg)
 			continue;
 
-		if (!ptep_test_and_clear_young(walk->vma, addr, pte + i))
+		if (!ptep_clear_young_notify(walk->vma, addr, pte + i))
 			continue;
 
 		young++;
@@ -4272,7 +4273,7 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 		if (!page_is_file_cache(page) && !can_swap)
 			continue;
 
-		if (!ptep_test_and_clear_young(pvmw->vma, addr, pte + i))
+		if (!ptep_clear_young_notify(pvmw->vma, addr, pte + i))
 			continue;
 
 		young++;
