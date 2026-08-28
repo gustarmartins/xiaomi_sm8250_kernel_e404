@@ -840,6 +840,13 @@ static int usbpd_pm_enable_sw(struct usbpd_pm *pdpm, bool enable)
 	val.intval = enable;
 	ret = power_supply_set_property(
 		pdpm->sw_psy, POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED, &val);
+	if (!ret && enable && pdpm->fcc_votable)
+		/*
+		 * FC2 may have left the main charger at its boot-time/standby
+		 * FCC.  Re-elect the normal FCC immediately after returning to
+		 * switch charging instead of waiting for a later notifier edge.
+		 */
+		rerun_election(pdpm->fcc_votable);
 
 	return ret;
 }
@@ -2063,6 +2070,19 @@ static int usbpd_pm_probe(struct platform_device *pdev)
 	ret = power_supply_reg_notifier(&pdpm->nb);
 	if (ret)
 		goto err_destroy_wq;
+
+	/*
+	 * The PD engine can publish PD_ACTIVE before this late-init policy
+	 * manager registers its notifier (especially when the cable is already
+	 * attached across a reboot).  In that case no edge is delivered and the
+	 * switch charger is left at its boot-time current while userspace still
+	 * reports "Charging".  Replay the current USB state once so an existing
+	 * PPS/fixed contract is handled exactly like a fresh notification.
+	 */
+	if (pdpm->usb_psy)
+		queue_work(pdpm->wq, &pdpm->usb_psy_change_work);
+	else
+		dev_warn(pdpm->dev, "USB power supply unavailable for initial PD sync\n");
 
 	return 0;
 
