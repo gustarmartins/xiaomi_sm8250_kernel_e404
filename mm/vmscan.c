@@ -3659,7 +3659,12 @@ restart:
 
 		walk_pmd_range(&val, addr, next, walk);
 
-		if (priv->batched >= MAX_LRU_BATCH) {
+		/*
+		 * A large address space can span many PMDs before the batch cap is
+		 * reached.  On ARM64, keep the page-table walk preemptible so reclaim
+		 * cannot hold mmap_read_lock() across an unbounded CPU slice.
+		 */
+		if (need_resched() || priv->batched >= MAX_LRU_BATCH) {
 			end = (addr | ~PUD_MASK) + 1;
 			goto done;
 		}
