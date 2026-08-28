@@ -6262,7 +6262,14 @@ static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
 		if (!managed_zone(zone))
 			continue;
 
-		if (!zone_reclaimable_pages(zone))
+		/*
+		 * A zone with no reclaimable pages but some free pages is not
+		 * relevant to direct-reclaim throttling.  If it has neither, keep
+		 * its reserve in the calculation so callers cannot loop forever
+		 * while this node is completely out of immediate runway.
+		 */
+		if (!zone_reclaimable_pages(zone) &&
+		    zone_page_state_snapshot(zone, NR_FREE_PAGES))
 			continue;
 
 		pfmemalloc_reserve += min_wmark_pages(zone);
