@@ -3827,17 +3827,32 @@ next:
 	return success;
 }
 
-static void inc_max_seq(struct lruvec *lruvec, bool can_swap, bool full_scan)
+static bool inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
+			bool can_swap, bool full_scan)
 {
+	bool success = true;
 	int prev, next;
 	int type, zone;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
 restart:
+	/*
+	 * Aging is prepared without the LRU lock.  A second aging caller (or a
+	 * forced debugfs scan) can advance max_seq while inc_min_seq() yields.
+	 * Never update compatibility LRU sizes for a generation other than the
+	 * one whose page tables this caller just walked.
+	 */
+	if (max_seq != READ_ONCE(lrugen->max_seq))
+		return false;
+
 	spin_lock_irq(&pgdat->lru_lock);
 
 	VM_BUG_ON(!seq_is_valid(lruvec));
+	if (max_seq != READ_ONCE(lrugen->max_seq)) {
+		success = false;
+		goto unlock;
+	}
 
 	for (type = ANON_AND_FILE - 1; type >= 0; type--) {
 		if (get_nr_gens(lruvec, type) != MAX_NR_GENS)
@@ -3886,7 +3901,9 @@ restart:
 	/* make sure preceding modifications appear */
 	smp_store_release(&lrugen->max_seq, lrugen->max_seq + 1);
 
+unlock:
 	spin_unlock_irq(&pgdat->lru_lock);
+	return success;
 }
 
 static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
@@ -3937,8 +3954,9 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long max_seq,
 done:
 	if (success) {
 		VM_BUG_ON(max_seq != READ_ONCE(lrugen->max_seq));
-		inc_max_seq(lruvec, can_swap, full_scan);
-		wakeup_flusher_threads(WB_REASON_VMSCAN);
+		success = inc_max_seq(lruvec, max_seq, can_swap, full_scan);
+		if (success)
+			wakeup_flusher_threads(WB_REASON_VMSCAN);
 	}
 
 	return success;
@@ -4126,6 +4144,7 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	struct lru_gen_mm_walk *walk;
 	int young = 0;
 	unsigned long bitmap[BITS_TO_LONGS(MIN_LRU_BATCH)] = {};
+	bool can_swap = !page_is_file_cache(pvmw->page);
 	struct mem_cgroup *memcg = page_memcg(pvmw->page);
 	struct pglist_data *pgdat = page_pgdat(pvmw->page);
 	struct lruvec *lruvec;
@@ -4207,6 +4226,16 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 			continue;
 
 		if (page_memcg_rcu(page) != memcg)
+			continue;
+
+		/*
+		 * A file VMA can contain anonymous COW pages.  When the
+		 * eviction walk cannot swap, promoting those pages here would
+		 * clear their young bits without making them reclaimable.  The
+		 * surrounding rmap walk's page type is the authoritative
+		 * can_swap decision; walk->can_swap may describe another type.
+		 */
+		if (!page_is_file_cache(page) && !can_swap)
 			continue;
 
 		if (!ptep_test_and_clear_young(pvmw->vma, addr, pte + i))
@@ -4449,14 +4478,13 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 
 	/*
 	 * The return value is a forward-progress signal, not scan accounting.
-	 * A sorted page was only promoted within the MGLRU lists; it was not
-	 * reclaimed and must not make direct reclaim immediately rescan this
-	 * working set.  K50 treated a full sorted-only batch as progress, which
-	 * can turn a 4.19 direct-reclaim pass into a repeated scan storm.  Keep
-	 * the K49 rule: only an isolation batch is forward progress.  The
-	 * dedicated counters above retain the complete scan cost.
+	 * Finishing a bounded batch can expose colder pages even if every page
+	 * in that batch was promoted by sort_page().  Preserve that progress so
+	 * kswapd and proactive reclaim can reach those pages without falling
+	 * out to another reclaim cycle.  A short batch with no isolation,
+	 * however, has exhausted the eligible candidates and must terminate.
 	 */
-	return isolated ? scanned : 0;
+	return isolated || scanned >= nr_to_scan ? scanned : 0;
 }
 
 static int get_tier_idx(struct lruvec *lruvec, int type)
@@ -4801,6 +4829,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		int nr_batch;
 		int swappiness;
 		long nr_to_scan;
+		unsigned long batch_reclaimed = sc->nr_reclaimed;
 
 		if (sc->may_swap)
 			swappiness = get_swappiness(lruvec, sc);
@@ -4819,6 +4848,18 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 			goto done;
 
 		if (sc->memcgs_avoid_swapping && swappiness < 200 && swapped)
+			break;
+
+		/*
+		 * A promotion-only batch is useful background/proactive work,
+		 * but repeating it in direct-reclaim context can extend the
+		 * caller's stall without freeing memory.  Let kswapd and
+		 * memory.reclaim consume the bounded scan budget; make other
+		 * direct reclaimers return after one no-reclaim batch and retry
+		 * through the normal priority loop.
+		 */
+		if (!current_is_kswapd() && !sc->proactive &&
+		    sc->nr_reclaimed == batch_reclaimed)
 			break;
 
 		scanned += delta;
