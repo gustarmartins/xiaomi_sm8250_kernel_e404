@@ -136,7 +136,9 @@ static int int_max = INT_MAX;
 static unsigned long zero_ul;
 static unsigned long one_ul = 1;
 static unsigned long long_max = LONG_MAX;
-static int one_hundred = 200;
+static int one_hundred = 100;
+/* Swappiness is intentionally allowed to use the upstream 0..200 scale. */
+static int swappiness_max = 200;
 static int __maybe_unused proactiveness_max = 100;
 static int one_thousand = 1000;
 #ifdef CONFIG_PRINTK
@@ -1866,7 +1868,7 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
-		.extra2		= &one_hundred,
+		.extra2		= &swappiness_max,
 	},
 	{
 		.procname       = "want_old_faultaround_pte",
