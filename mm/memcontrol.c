@@ -5829,6 +5829,10 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 		if (signal_pending(current))
 			return -EINTR;
 
+		/* cgroup_rmdir() waits for us with cgroup_mutex held. */
+		if (css_is_dying(&memcg->css))
+			return -EAGAIN;
+
 		/*
 		 * This is the final attempt, drain percpu lru caches in the
 		 * hope of introducing more evictable pages for
