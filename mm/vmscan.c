@@ -3004,14 +3004,12 @@ static bool should_skip_mm(struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 		return true;
 
 	/*
-	 * Hold an mm_users reference, not only mm_count.  mmgrab() keeps the
-	 * descriptor allocated after the last user exits, but it does not stop
-	 * __mmput() from entering exit_mmap() and tearing down page tables while
-	 * MGLRU is preparing to walk them.  This matches the maintained Android
-	 * 5.15 walker lifetime contract and makes an exiting address space
-	 * ineligible for a new aging walk.
+	 * Pin only the mm_struct. walk_mm() takes mmap_sem before reading VMAs
+	 * or page tables. An mm_users reference would keep a dying address
+	 * space alive and delay OOM reaping and process_mrelease().
 	 */
-	return !mmget_not_zero(mm);
+	mmgrab(mm);
+	return false;
 }
 
 static bool iterate_mm_list(struct lruvec *lruvec, struct lru_gen_mm_walk *walk,
@@ -3074,9 +3072,9 @@ done:
 
 	spin_unlock(&mm_list->lock);
 
-	/* __mmput() can sleep and may run exit_mmap(); never do it under mm_list. */
+	/* Drop the mm_count pin after releasing the list lock. */
 	if (*iter)
-		mmput_async(*iter);
+		mmdrop(*iter);
 
 	*iter = mm;
 
