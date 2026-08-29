@@ -4878,7 +4878,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		if (should_abort_lru_gen_scan(lruvec, max_seq, sc))
 			break;
 
-		cond_resched();
+		cond_resched_tasks_rcu_qs();
 	}
 
 	if (!need_aging)
@@ -5654,7 +5654,7 @@ static void shrink_node_memcg(struct pglist_data *pgdat, struct mem_cgroup *memc
 			}
 		}
 
-		cond_resched();
+		cond_resched_tasks_rcu_qs();
 
 		if (nr_reclaimed < nr_to_reclaim || proportional_reclaim)
 			continue;
