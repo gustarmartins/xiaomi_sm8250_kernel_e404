@@ -358,6 +358,13 @@ unsigned long zone_reclaimable_pages(struct zone *zone)
 	if (get_nr_swap_pages() > 0)
 		nr += zone_page_state_snapshot(zone, NR_ZONE_INACTIVE_ANON) +
 			zone_page_state_snapshot(zone, NR_ZONE_ACTIVE_ANON);
+	/*
+	 * A free-only zone still provides allocator runway.  Include it when
+	 * no file-backed or anonymous pages are reclaimable so all callers of
+	 * zone_reclaimable_pages() make the same forward-progress decision.
+	 */
+	if (!nr)
+		nr = zone_page_state_snapshot(zone, NR_FREE_PAGES);
 
 	return nr;
 }
@@ -6287,14 +6294,8 @@ static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
 		if (!managed_zone(zone))
 			continue;
 
-		/*
-		 * A zone with no LRU pages can still provide allocator runway.
-		 * Count it when free pages are present; otherwise a zone split
-		 * (for example DMA32 plus Normal) can be skipped entirely and
-		 * throttle_direct_reclaim() can undercount the node's reserves.
-		 */
 		if (!zone_reclaimable_pages(zone) &&
-		    !zone_page_state_snapshot(zone, NR_FREE_PAGES))
+		    zone_page_state_snapshot(zone, NR_FREE_PAGES))
 			continue;
 
 		pfmemalloc_reserve += min_wmark_pages(zone);
