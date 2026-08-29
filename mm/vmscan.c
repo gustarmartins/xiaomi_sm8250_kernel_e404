@@ -6258,13 +6258,13 @@ static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
 			continue;
 
 		/*
-		 * A zone with no reclaimable pages but some free pages is not
-		 * relevant to direct-reclaim throttling.  If it has neither, keep
-		 * its reserve in the calculation so callers cannot loop forever
-		 * while this node is completely out of immediate runway.
+		 * A zone with no LRU pages can still provide allocator runway.
+		 * Count it when free pages are present; otherwise a zone split
+		 * (for example DMA32 plus Normal) can be skipped entirely and
+		 * throttle_direct_reclaim() can undercount the node's reserves.
 		 */
 		if (!zone_reclaimable_pages(zone) &&
-		    zone_page_state_snapshot(zone, NR_FREE_PAGES))
+		    !zone_page_state_snapshot(zone, NR_FREE_PAGES))
 			continue;
 
 		pfmemalloc_reserve += min_wmark_pages(zone);
@@ -7465,7 +7465,8 @@ int node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned int order)
 		return NODE_RECLAIM_NOSCAN;
 
 	ret = __node_reclaim(pgdat, gfp_mask, order);
-	clear_bit(PGDAT_RECLAIM_LOCKED, &pgdat->flags);
+	/* Release the node-reclaim lock after publishing reclaim results. */
+	clear_bit_unlock(PGDAT_RECLAIM_LOCKED, &pgdat->flags);
 
 	if (!ret)
 		count_vm_event(PGSCAN_ZONE_RECLAIM_FAILED);
