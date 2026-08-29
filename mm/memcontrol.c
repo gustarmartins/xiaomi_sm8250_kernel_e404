@@ -5827,7 +5827,7 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 		unsigned long reclaimed, remaining;
 
 		if (signal_pending(current))
-			return -EINTR;
+			return -ERESTARTSYS;
 
 		/* cgroup_rmdir() waits for us with cgroup_mutex held. */
 		if (css_is_dying(&memcg->css))

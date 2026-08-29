@@ -4810,6 +4810,10 @@ static bool should_abort_lru_gen_scan(struct lruvec *lruvec,
 {
 	DEFINE_MAX_SEQ(lruvec);
 
+	/* Let suspend freezer signals stop long proactive MGLRU scans. */
+	if (unlikely(sc->proactive && signal_pending(current)))
+		return true;
+
 	/* Bound page-table aging performed by one direct reclaimer. */
 	if (!current_is_kswapd() && max_seq - seq > 1)
 		return true;
