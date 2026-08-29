@@ -2460,6 +2460,24 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	unsigned long ap, fp;
 	enum lru_list lru;
 
+	/*
+	 * Proactive swappiness=max is an anonymous-only contract.  Check it
+	 * before the ordinary no-swap fallback: when anonymous pages cannot be
+	 * reclaimed, returning a file scan would silently violate that
+	 * contract.
+	 */
+	if (swappiness == SWAPPINESS_ANON_ONLY) {
+		WARN_ON_ONCE(!sc->proactive);
+		if (!sc->may_swap || mem_cgroup_get_nr_swap_pages(memcg) <= 0) {
+			*lru_pages = 0;
+			memset(nr, 0, sizeof(*nr) * NR_LRU_LISTS);
+			return;
+		}
+
+		scan_balance = SCAN_ANON;
+		goto out;
+	}
+
 	/* If we have no swap space, do not bother scanning anon pages. */
 	if (!sc->may_swap || mem_cgroup_get_nr_swap_pages(memcg) <= 0) {
 		scan_balance = SCAN_FILE;
@@ -2475,12 +2493,6 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 	 */
 	if (!global_reclaim(sc) && !swappiness) {
 		scan_balance = SCAN_FILE;
-		goto out;
-	}
-
-	if (swappiness == SWAPPINESS_ANON_ONLY) {
-		WARN_ON_ONCE(!sc->proactive);
-		scan_balance = SCAN_ANON;
 		goto out;
 	}
 
