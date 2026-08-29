@@ -2986,7 +2986,8 @@ static bool should_skip_mm(struct mm_struct *mm, struct lru_gen_mm_walk *walk)
 
 	node_clear(pgdat->node_id, mm->lru_gen.nodes);
 
-	for (type = !walk->can_swap; type < ANON_AND_FILE; type++) {
+	for (type = min_type(walk->swappiness);
+	     type <= max_type(walk->swappiness); type++) {
 		size += type ? get_mm_counter(mm, MM_FILEPAGES) :
 			       get_mm_counter(mm, MM_ANONPAGES) +
 			       get_mm_counter(mm, MM_SHMEMPAGES);
@@ -3304,7 +3305,7 @@ static int should_skip_vma(unsigned long start, unsigned long end, struct mm_wal
 		return true;
 
 	if (vma_is_anonymous(vma))
-		return !priv->can_swap;
+		return !priv->swappiness;
 
 	if (WARN_ON_ONCE(!vma->vm_file || !vma->vm_file->f_mapping))
 		return true;
@@ -3313,8 +3314,15 @@ static int should_skip_vma(unsigned long start, unsigned long end, struct mm_wal
 	if (mapping_unevictable(mapping))
 		return true;
 
+	if (shmem_mapping(mapping))
+		return !priv->swappiness;
+
+	/* Anonymous-only reclaim must not walk file-backed mappings. */
+	if (priv->swappiness > MAX_SWAPPINESS)
+		return true;
+
 	/* check readpage to exclude special mappings like dax, etc. */
-	return shmem_mapping(mapping) ? !priv->can_swap : !mapping->a_ops->readpage;
+	return !mapping->a_ops->readpage;
 }
 
 /*
@@ -3979,7 +3987,7 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec,
 
 	walk->lruvec = lruvec;
 	walk->max_seq = max_seq;
-	walk->can_swap = swappiness;
+	walk->swappiness = swappiness;
 	walk->full_scan = full_scan;
 
 	do {
@@ -4275,7 +4283,7 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 		 * eviction walk cannot swap, promoting those pages here would
 		 * clear their young bits without making them reclaimable.  The
 		 * surrounding rmap walk's page type is the authoritative
-		 * can_swap decision; walk->can_swap may describe another type.
+		 * can_swap decision; walk->swappiness may describe another type.
 		 */
 		if (!page_is_file_cache(page) && !can_swap)
 			continue;

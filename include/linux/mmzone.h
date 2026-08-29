@@ -415,7 +415,8 @@ struct lru_gen_mm_walk {
 	int mm_stats[NR_MM_STATS];
 	/* total batched items */
 	int batched;
-	bool can_swap;
+	/* reclaim swappiness, including SWAPPINESS_ANON_ONLY */
+	int swappiness;
 	bool full_scan;
 };
 
