@@ -23,6 +23,17 @@ static inline int page_is_file_cache(struct page *page)
 	return !PageSwapBacked(page);
 }
 
+/*
+ * Classify a page from a captured flags snapshot.  Page-table walkers can
+ * update the MGLRU generation without holding the LRU lock, so re-reading
+ * PageSwapBacked later can observe a MADV_FREE anon/file transition and
+ * charge the generation delta to the wrong bucket.
+ */
+static inline int page_flags_is_file_cache(unsigned long flags)
+{
+	return !(flags & BIT(PG_swapbacked));
+}
+
 static __always_inline void __update_lru_size(struct lruvec *lruvec,
 				enum lru_list lru, enum zone_type zid,
 				int nr_pages)
@@ -159,9 +170,8 @@ static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
 }
 
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
-				       int old_gen, int new_gen)
+			       int old_gen, int new_gen, int type)
 {
-	int type = page_is_file_cache(page);
 	int zone = page_zonenum(page);
 	int delta = hpage_nr_pages(page);
 	enum lru_list lru = type * LRU_INACTIVE_FILE;
@@ -250,7 +260,7 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 		new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
-	lru_gen_update_size(lruvec, page, -1, gen);
+	lru_gen_update_size(lruvec, page, -1, gen, type);
 	/* for rotate_reclaimable_page() */
 	if (reclaiming)
 		list_add_tail(&page->lru, &lrugen->lists[gen][type][zone]);
@@ -262,7 +272,7 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 
 static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
 {
-	int gen;
+	int gen, type;
 	unsigned long old_flags, new_flags;
 
 	do {
@@ -285,7 +295,9 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 			new_flags |= BIT(PG_active);
 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
-	lru_gen_update_size(lruvec, page, gen, -1);
+	/* Account deletion against the type in the CAS-linearized state. */
+	type = page_flags_is_file_cache(old_flags);
+	lru_gen_update_size(lruvec, page, gen, -1, type);
 	list_del(&page->lru);
 
 	return true;

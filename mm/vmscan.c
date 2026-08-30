@@ -3214,7 +3214,7 @@ static bool positive_ctrl_err(struct ctrl_pos *sp, struct ctrl_pos *pv)
  *                          the aging
  ******************************************************************************/
 
-static int page_update_gen(struct page *page, int gen)
+static int page_update_gen(struct page *page, int gen, int *type)
 {
 	unsigned long old_flags, new_flags;
 
@@ -3236,6 +3236,9 @@ static int page_update_gen(struct page *page, int gen)
 	} while (new_flags != old_flags &&
 		 cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
+	/* The CAS linearizes the generation transition against old_flags. */
+	*type = page_flags_is_file_cache(old_flags);
+
 	return ((old_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 }
 
@@ -3244,18 +3247,24 @@ static int page_inc_gen(struct lruvec *lruvec, struct page *page, bool reclaimin
 	unsigned long old_flags, new_flags;
 	int type = page_is_file_cache(page);
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
-	int new_gen, old_gen = lru_gen_from_seq(lrugen->min_seq[type]);
+	int new_gen, old_gen;
+	int min_gen = lru_gen_from_seq(lrugen->min_seq[type]);
 
 	do {
 		new_flags = old_flags = READ_ONCE(page->flags);
 		VM_BUG_ON_PAGE(!(new_flags & LRU_GEN_MASK), page);
 
-		new_gen = ((new_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
-		/* page_update_gen() has promoted this page? */
-		if (new_gen >= 0 && new_gen != old_gen)
-			return new_gen;
+		old_gen = ((new_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+		/* This helper should only be called for pages on an MGLRU list. */
+		VM_WARN_ON_ONCE(old_gen < 0);
+		if (old_gen < 0)
+			return min_gen;
 
-		new_gen = (old_gen + 1) % MAX_NR_GENS;
+		/* page_update_gen() has promoted this page? */
+		if (old_gen != min_gen)
+			return old_gen;
+
+		new_gen = (min_gen + 1) % MAX_NR_GENS;
 
 		new_flags &= ~LRU_GEN_MASK;
 		new_flags |= (new_gen + 1UL) << LRU_GEN_PGOFF;
@@ -3265,15 +3274,14 @@ static int page_inc_gen(struct lruvec *lruvec, struct page *page, bool reclaimin
 			new_flags |= BIT(PG_reclaim);
 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
-	lru_gen_update_size(lruvec, page, old_gen, new_gen);
+	lru_gen_update_size(lruvec, page, old_gen, new_gen, type);
 
 	return new_gen;
 }
 
 static void update_batch_size(struct lru_gen_mm_walk *walk, struct page *page,
-			      int old_gen, int new_gen)
+			      int old_gen, int new_gen, int type)
 {
-	int type = page_is_file_cache(page);
 	int zone = page_zonenum(page);
 	int delta = hpage_nr_pages(page);
 
@@ -3402,6 +3410,7 @@ static bool walk_pte_range(pmd_t *pmd, unsigned long start, unsigned long end,
 	struct mem_cgroup *memcg = lruvec_memcg(priv->lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(priv->lruvec);
 	int old_gen, new_gen = lru_gen_from_seq(priv->max_seq);
+	int type;
 
 	VM_BUG_ON(pmd_trans_huge(*pmd) || pmd_devmap(*pmd));
 
@@ -3457,9 +3466,9 @@ restart:
 		    !(PageAnon(page) && PageSwapBacked(page) && !PageSwapCache(page)))
 			set_page_dirty(page);
 
-		old_gen = page_update_gen(page, new_gen);
+		old_gen = page_update_gen(page, new_gen, &type);
 		if (old_gen >= 0 && old_gen != new_gen)
-			update_batch_size(priv, page, old_gen, new_gen);
+			update_batch_size(priv, page, old_gen, new_gen, type);
 	}
 
 	if (i < PTRS_PER_PTE && get_next_vma(walk, PMD_MASK, PAGE_SIZE, &start, &end))
@@ -3484,6 +3493,7 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long next, struct vm_area
 	struct mem_cgroup *memcg = lruvec_memcg(priv->lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(priv->lruvec);
 	int old_gen, new_gen = lru_gen_from_seq(priv->max_seq);
+	int type;
 
 	VM_BUG_ON(pud_trans_huge(*pud) || pud_devmap(*pud));
 
@@ -3550,9 +3560,9 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long next, struct vm_area
 		    !(PageAnon(page) && PageSwapBacked(page) && !PageSwapCache(page)))
 			set_page_dirty(page);
 
-		old_gen = page_update_gen(page, new_gen);
+		old_gen = page_update_gen(page, new_gen, &type);
 		if (old_gen >= 0 && old_gen != new_gen)
-			update_batch_size(priv, page, old_gen, new_gen);
+			update_batch_size(priv, page, old_gen, new_gen, type);
 next:
 		i = i > MIN_LRU_BATCH ? 0 :
 		    find_next_bit(priv->bitmap, MIN_LRU_BATCH, i) + 1;
@@ -4214,7 +4224,7 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 	struct pglist_data *pgdat = page_pgdat(pvmw->page);
 	struct lruvec *lruvec;
 	unsigned long max_seq;
-	int old_gen, new_gen;
+	int old_gen, new_gen, type;
 
 	lockdep_assert_held(pvmw->ptl);
 	VM_BUG_ON_PAGE(PageLRU(pvmw->page), pvmw->page);
@@ -4350,14 +4360,15 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 		if (page_memcg_rcu(page) != memcg)
 			continue;
 
-		old_gen = page_update_gen(page, new_gen);
+		old_gen = page_update_gen(page, new_gen, &type);
 		if (old_gen < 0 || old_gen == new_gen)
 			continue;
 
 		if (walk)
-			update_batch_size(walk, page, old_gen, new_gen);
+			update_batch_size(walk, page, old_gen, new_gen, type);
 		else
-			lru_gen_update_size(lruvec, page, old_gen, new_gen);
+			/* page_update_gen() ran before lru_lock; keep its CAS type. */
+			lru_gen_update_size(lruvec, page, old_gen, new_gen, type);
 	}
 
 	if (!walk)
@@ -6304,8 +6315,15 @@ static bool allow_direct_reclaim(pg_data_t *pgdat, bool using_kswapd)
 		if (!managed_zone(zone))
 			continue;
 
+		/*
+		 * zone_reclaimable_pages() includes free pages for a free-only
+		 * zone.  Skip only a genuinely empty zone; counting its watermark
+		 * reserve would make direct reclaim wait for runway that cannot
+		 * contribute to this allocation.  A free-only zone remains part of
+		 * the calculation and therefore continues to provide runway.
+		 */
 		if (!zone_reclaimable_pages(zone) &&
-		    zone_page_state_snapshot(zone, NR_FREE_PAGES))
+		    !zone_page_state_snapshot(zone, NR_FREE_PAGES))
 			continue;
 
 		pfmemalloc_reserve += min_wmark_pages(zone);
