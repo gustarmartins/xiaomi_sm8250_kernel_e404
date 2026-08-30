@@ -4901,7 +4901,6 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		int nr_batch;
 		int swappiness;
 		long nr_to_scan;
-		unsigned long batch_reclaimed = sc->nr_reclaimed;
 
 		if (sc->may_swap)
 			swappiness = get_swappiness(lruvec, sc);
@@ -4920,18 +4919,6 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 			goto done;
 
 		if (sc->memcgs_avoid_swapping && swappiness < 200 && swapped)
-			break;
-
-		/*
-		 * A promotion-only batch is useful background/proactive work,
-		 * but repeating it in direct-reclaim context can extend the
-		 * caller's stall without freeing memory.  Let kswapd and
-		 * memory.reclaim consume the bounded scan budget; make other
-		 * direct reclaimers return after one no-reclaim batch and retry
-		 * through the normal priority loop.
-		 */
-		if (!current_is_kswapd() && !sc->proactive &&
-		    sc->nr_reclaimed == batch_reclaimed)
 			break;
 
 		scanned += delta;
