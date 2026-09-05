@@ -5105,6 +5105,52 @@ unlock:
  *                          sysfs interface
  ******************************************************************************/
 
+static ssize_t show_lru_gen_accounting(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	struct mem_cgroup *memcg = NULL;
+	long generations[LRU_UNEVICTABLE] = {};
+	long compatibility[LRU_UNEVICTABLE] = {};
+	unsigned long negative_buckets = 0;
+	int nid, gen, type, zone, lru;
+	ssize_t len = 0;
+
+	/* Read-only diagnosis; no global LRU walk or counter repair. */
+	memcg = mem_cgroup_iter(NULL, NULL, NULL);
+	do {
+		for_each_node_state(nid, N_MEMORY) {
+			struct lruvec *lruvec = mem_cgroup_lruvec(NODE_DATA(nid), memcg);
+			struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+
+			spin_lock_irq(&pgdat->lru_lock);
+			for_each_gen_type_zone(gen, type, zone) {
+				long size = lruvec->lrugen.nr_pages[gen][type][zone];
+
+				lru = type * LRU_FILE + lru_gen_is_active(lruvec, gen);
+				generations[lru] += size;
+				negative_buckets += size < 0;
+			}
+			spin_unlock_irq(&pgdat->lru_lock);
+		}
+		cond_resched();
+	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
+	for (lru = 0; lru < LRU_UNEVICTABLE; lru++)
+		compatibility[lru] = atomic_long_read(&vm_node_stat[NR_LRU_BASE + lru]);
+	len += scnprintf(buf + len, PAGE_SIZE - len,
+		"unit=pages snapshot=non-atomic negative_generation_buckets=%lu\n",
+		negative_buckets);
+	for (lru = 0; lru < LRU_UNEVICTABLE; lru++)
+		len += scnprintf(buf + len, PAGE_SIZE - len,
+			"%s_%s generation=%ld compatibility_raw=%ld\n",
+			lru & LRU_ACTIVE ? "active" : "inactive",
+			lru & LRU_FILE ? "file" : "anon",
+			generations[lru], compatibility[lru]);
+	return len;
+}
+
+static struct kobj_attribute lru_gen_accounting_attr =
+	__ATTR(accounting, 0400, show_lru_gen_accounting, NULL);
+
 static ssize_t show_min_ttl(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%u\n", jiffies_to_msecs(READ_ONCE(lru_gen_min_ttl)));
@@ -5199,6 +5245,7 @@ static struct kobj_attribute lru_gen_enabled_attr = __ATTR(
 );
 
 static struct attribute *lru_gen_attrs[] = {
+	&lru_gen_accounting_attr.attr,
 	&lru_gen_min_ttl_fail_open_attr.attr,
 	&lru_gen_min_ttl_unsatisfied_attr.attr,
 	&lru_gen_min_ttl_attr.attr,

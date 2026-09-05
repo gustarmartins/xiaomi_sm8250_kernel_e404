@@ -505,26 +505,49 @@ unsigned long mem_cgroup_node_nr_lru_pages(struct mem_cgroup *memcg,
 					   int nid, unsigned int lru_mask);
 
 static inline
-unsigned long mem_cgroup_get_lru_size(struct lruvec *lruvec, enum lru_list lru)
-{
-	struct mem_cgroup_per_node *mz;
-	unsigned long nr_pages = 0;
-	int zid;
-
-	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
-	for (zid = 0; zid < MAX_NR_ZONES; zid++)
-		nr_pages += mz->lru_zone_size[zid][lru];
-	return nr_pages;
-}
-
-static inline
 unsigned long mem_cgroup_get_zone_lru_size(struct lruvec *lruvec,
 		enum lru_list lru, int zone_idx)
 {
 	struct mem_cgroup_per_node *mz;
+	long nr_pages;
 
 	mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
-	return mz->lru_zone_size[zone_idx][lru];
+	nr_pages = READ_ONCE(mz->lru_zone_size[zone_idx][lru]);
+#ifdef CONFIG_LRU_GEN
+	/*
+	 * 4.19 readers use lru_zone_size, which only counts classic lists.
+	 * Include the generational lists too, including while a runtime switch
+	 * is draining one representation into the other. Sum signed buckets
+	 * before clamping: deferred page-table updates can make one negative.
+	 */
+	if (lru != LRU_UNEVICTABLE) {
+		struct lru_gen_struct *lrugen = &lruvec->lrugen;
+		unsigned long max_seq = READ_ONCE(lrugen->max_seq);
+		int youngest = max_seq % MAX_NR_GENS;
+		int previous = (max_seq - 1) % MAX_NR_GENS;
+		int gen, type = lru / LRU_FILE;
+		bool active = lru & LRU_ACTIVE;
+
+		for (gen = 0; gen < MAX_NR_GENS; gen++) {
+			bool young = gen == youngest || gen == previous;
+
+			if (young == active)
+				nr_pages += READ_ONCE(lrugen->nr_pages[gen][type][zone_idx]);
+		}
+	}
+#endif
+	return max(nr_pages, 0L);
+}
+
+static inline
+unsigned long mem_cgroup_get_lru_size(struct lruvec *lruvec, enum lru_list lru)
+{
+	unsigned long nr_pages = 0;
+	int zid;
+
+	for (zid = 0; zid < MAX_NR_ZONES; zid++)
+		nr_pages += mem_cgroup_get_zone_lru_size(lruvec, lru, zid);
+	return nr_pages;
 }
 
 void mem_cgroup_handle_over_high(void);
