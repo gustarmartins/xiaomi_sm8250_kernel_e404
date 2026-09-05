@@ -978,10 +978,6 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		if (__isolate_lru_page_prepare(page, isolate_mode) != 0)
 			goto isolate_fail_put;
 
-		/* Try isolate the page */
-		if (!TestClearPageLRU(page))
-			goto isolate_fail_put;
-
 		/* If we already hold the lock, we can skip some rechecking */
 		if (!locked) {
 			locked = compact_lock_irqsave(zone_lru_lock(zone),
@@ -1001,7 +997,6 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 			 */
 			if (unlikely(PageCompound(page))) {
 				low_pfn += (1UL << compound_order(page)) - 1;
-				SetPageLRU(page);
 				goto isolate_fail_put;
 			}
 		}
@@ -1009,6 +1004,17 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		lruvec = mem_cgroup_page_lruvec(page, zone->zone_pgdat);
 
 		VM_BUG_ON_PAGE(PageCompound(page), page);
+
+		/*
+		 * This backport still uses the node-wide LRU lock. Claim the
+		 * page only while holding it: MGLRU reclaim can isolate a page
+		 * from its list while a pre-lock PG_lru claimant is waiting.
+		 * Taking ownership before the lock lets both paths delete the
+		 * same page and can corrupt a private reclaim/migration list.
+		 */
+		if (__isolate_lru_page_prepare(page, isolate_mode) != 0 ||
+		    !TestClearPageLRU(page))
+			goto isolate_fail_put;
 
 		/* Successfully isolated */
 		del_page_from_lru_list(page, lruvec);
@@ -1084,7 +1090,7 @@ isolate_abort:
 	if (locked)
 		spin_unlock_irqrestore(zone_lru_lock(zone), flags);
 	if (page) {
-		SetPageLRU(page);
+		/* Skip-abort occurs before this scanner claims PG_lru. */
 		put_page(page);
 	}
 
