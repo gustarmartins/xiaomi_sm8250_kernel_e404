@@ -36,6 +36,7 @@
 #include <linux/cred.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 
 #include "kcompressd.h"
 #include "zram_drv.h"
@@ -1433,9 +1434,14 @@ int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl,
 	while ((pps = select_pp_slot(ctl))) {
 		u32 index = pps->index;
 
-		/* Bound temporary pages, bios and high-priority work per ioctl. */
-		wait_event(pf_ctl.done_wait,
-			   atomic_read(&pf_ctl.num_inflight) < max_inflight);
+		/* Stop submitting after cancellation, but drain existing bios below:
+		 * their completion callbacks still reference the stack-owned ctl. */
+		ret = wait_event_killable(pf_ctl.done_wait,
+				atomic_read(&pf_ctl.num_inflight) < max_inflight);
+		if (ret || fatal_signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
 
 		zram_slot_lock(zram, index);
 		if (!zram_test_flag(zram, index, ZRAM_PP_SLOT) ||
@@ -1587,6 +1593,10 @@ int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 	int ret = 0, err = 0;
 
 	while ((pps = select_pp_slot(pp_ctl))) {
+		if (fatal_signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
 		if (zram->wb_limit_enable && !zram->bd_wb_limit) {
 			ret = -EIO;
 			break;
@@ -1597,8 +1607,12 @@ int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 			if (req)
 				break;
 
-			wait_event(wb_ctl->done_wait,
-				   !list_empty(&wb_ctl->done_reqs));
+			if (wait_event_killable(wb_ctl->done_wait,
+					       !list_empty(&wb_ctl->done_reqs)) ||
+			    fatal_signal_pending(current)) {
+				ret = -EINTR;
+				goto out;
+			}
 			err = zram_complete_done_reqs(zram, wb_ctl);
 			if (err)
 				ret = err;
@@ -1648,6 +1662,9 @@ next:
 		release_pp_slot(zram, pps);
 	}
 
+out:
+	/* End-I/O still owns submitted requests. Cancellation stops new work;
+	 * it must not free their control structure before completions drain. */
 	if (req)
 		release_wb_req(req);
 	if (blk_idx != INVALID_BDEV_BLOCK)
