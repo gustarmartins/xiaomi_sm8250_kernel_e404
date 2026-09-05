@@ -503,13 +503,18 @@ static ssize_t mem_used_max_store(struct device *dev,
  * Mark all pages which are older than or equal to cutoff as IDLE.
  * Callers should hold the zram init lock in read mode
  */
-static void mark_idle(struct zram *zram, ktime_t cutoff)
+static int mark_idle(struct zram *zram, ktime_t cutoff)
 {
 	int is_idle = 1;
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	int index;
 
 	for (index = 0; index < nr_pages; index++) {
+		if (!(index % 256))
+			cond_resched();
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
 		/*
 		 * Do not mark ZRAM_SAME slots as ZRAM_IDLE, because no
 		 * post-processing (recompress, writeback) happens to the
@@ -535,6 +540,7 @@ static void mark_idle(struct zram *zram, ktime_t cutoff)
 			zram_clear_flag(zram, index, ZRAM_IDLE);
 		zram_slot_unlock(zram, index);
 	}
+	return 0;
 }
 
 static ssize_t idle_store(struct device *dev,
@@ -566,8 +572,9 @@ static ssize_t idle_store(struct device *dev,
 	 * A cutoff_time of 0 marks everything as idle, this is the
 	 * "all" behavior.
 	 */
-	mark_idle(zram, cutoff_time);
-	rv = len;
+	rv = mark_idle(zram, cutoff_time);
+	if (!rv)
+		rv = len;
 
 out_unlock:
 	up_read(&zram->init_lock);
@@ -1492,6 +1499,11 @@ static int scan_slots_for_writeback(struct zram *zram, u32 mode,
 	for (; nr_pages != 0; index++, nr_pages--) {
 		bool ok = true;
 
+		if (!(index % 256))
+			cond_resched();
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
 		zram_slot_lock(zram, index);
 		if (!zram_allocated(zram, index))
 			goto next;
@@ -1746,7 +1758,11 @@ static ssize_t writeback_store(struct device *dev,
 			  nr_pages, atomic64_read(&zram->stats.bd_writes));
 	action_started = true;
 
-	scan_slots_for_writeback(zram, mode, nr_pages, index, pp_ctl);
+	err = scan_slots_for_writeback(zram, mode, nr_pages, index, pp_ctl);
+	if (err) {
+		ret = err;
+		goto release_init_lock;
+	}
 	err = zram_writeback_slots(zram, pp_ctl, wb_ctl);
 	if (err)
 		ret = err;
@@ -2752,6 +2768,11 @@ static int scan_slots_for_recompress(struct zram *zram, u32 mode, u32 prio_max,
 	for (index = 0; index < nr_pages; index++) {
 		bool ok = true;
 
+		if (!(index % 256))
+			cond_resched();
+		if (fatal_signal_pending(current))
+			return -EINTR;
+
 		zram_slot_lock(zram, index);
 		if (!zram_allocated(zram, index))
 			goto next;
@@ -3070,11 +3091,18 @@ static ssize_t recompress_store(struct device *dev,
 			  atomic64_read(&zram->stats.compr_data_size));
 	action_started = true;
 
-	scan_slots_for_recompress(zram, mode, prio_max, ctl);
+	ret = scan_slots_for_recompress(zram, mode, prio_max, ctl);
+	if (ret)
+		goto release_init_lock;
 
 	ret = len;
 	while ((pps = select_pp_slot(ctl))) {
 		int err = 0;
+
+		if (fatal_signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
 
 		if (!num_recomp_pages)
 			break;
