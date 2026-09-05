@@ -4453,7 +4453,11 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 	if (!get_page_unless_zero(page))
 		return false;
 
-	ClearPageLRU(page);
+	/* Another isolator may claim PG_lru before acquiring lru_lock. */
+	if (!TestClearPageLRU(page)) {
+		put_page(page);
+		return false;
+	}
 
 	success = lru_gen_del_page(lruvec, page, true);
 	VM_BUG_ON_PAGE(!success, page);
