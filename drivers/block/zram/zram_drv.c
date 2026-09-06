@@ -37,6 +37,7 @@
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
+#include <linux/mem_boost.h>
 
 #include "kcompressd.h"
 #include "zram_drv.h"
@@ -1496,11 +1497,17 @@ static int scan_slots_for_writeback(struct zram *zram, u32 mode,
 				    unsigned long index,
 				    struct zram_pp_ctl *ctl)
 {
+	if (mem_boost_active())
+		return -EBUSY;
+
 	for (; nr_pages != 0; index++, nr_pages--) {
 		bool ok = true;
 
-		if (!(index % 256))
+		if (!(index % 256)) {
 			cond_resched();
+			if (mem_boost_active())
+				return -EBUSY;
+		}
 		if (fatal_signal_pending(current))
 			return -EINTR;
 
@@ -1605,6 +1612,10 @@ int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 	int ret = 0, err = 0;
 
 	while ((pps = select_pp_slot(pp_ctl))) {
+		if (mem_boost_active()) {
+			ret = -EBUSY;
+			break;
+		}
 		if (fatal_signal_pending(current)) {
 			ret = -EINTR;
 			break;
@@ -1630,6 +1641,11 @@ int zram_writeback_slots(struct zram *zram, struct zram_pp_ctl *pp_ctl,
 				ret = err;
 		}
 
+		/* Recheck after waiting for an in-flight bio. */
+		if (mem_boost_active()) {
+			ret = -EBUSY;
+			break;
+		}
 		if (blk_idx == INVALID_BDEV_BLOCK) {
 			blk_idx = alloc_block_bdev(zram);
 			if (blk_idx == INVALID_BDEV_BLOCK) {
@@ -1724,6 +1740,9 @@ static ssize_t writeback_store(struct device *dev,
 		nr_pages = 1;
 		mode = PAGE_WRITEBACK;
 	}
+
+	if (mem_boost_active())
+		return -EBUSY;
 
 	down_read(&zram->init_lock);
 	if (!init_done(zram)) {

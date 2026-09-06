@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Short, explicit userspace hints; expiry never needs a userspace reset. */
 #include <linux/init.h>
+#include <linux/export.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
@@ -31,11 +32,17 @@ static unsigned int mem_boost_current_mode(void)
 	return mode && time_before(jiffies, expires) ? mode : 0;
 }
 
+bool mem_boost_active(void)
+{
+	return mem_boost_current_mode() >= 2;
+}
+EXPORT_SYMBOL_GPL(mem_boost_active);
+
 bool mem_boost_file_reclaim(void)
 {
 	unsigned long ram, floor_mb, file;
 
-	if (mem_boost_current_mode() < 2)
+	if (!mem_boost_active())
 		return false;
 
 	ram = totalram_pages >> (30 - PAGE_SHIFT);

@@ -66,7 +66,8 @@ struct zram {
 struct device { struct zram *zram; };
 static int scenario, locks, visits, yields, queued, pages, controls;
 static int processed, writebacks, finishes, finish_status, compactions;
-static bool cancelled, empty_slots;
+static bool cancelled, empty_slots, boosted;
+static bool mem_boost_active(void) { return boosted; }
 static int exchange(int *p,int v) { int old=*p;*p=v;return old; }
 static void down_read(int *p) { assert(*p==0);++*p; }
 static void up_read(int *p) { assert(*p==1);--*p; }
@@ -74,6 +75,7 @@ static bool init_done(struct zram *z) { return z->disksize!=0; }
 static struct zram *dev_to_zram(struct device *d) { return d->zram; }
 static void cond_resched(void) {
     assert(locks==0); yields++; if(scenario==3 && yields==2) cancelled=true;
+    if(scenario==5 && yields==2) boosted=true;
 }
 static bool fatal_signal_pending(void *p) { return cancelled; }
 static void zram_slot_lock(struct zram *z,u32 i) {
@@ -137,14 +139,17 @@ int main(int argc,char **argv) {
     struct zram z={.disksize=(uint64_t)SLOTS<<PAGE_SHIFT,.num_active_comps=2,.backing_dev=&z};
     struct device d={.zram=&z};
     for(int i=0;i<SLOTS;i++)z.table[i].flags=ZRAM_HUGE;
-    cancelled=scenario==1;
+    cancelled=scenario==1;boosted=scenario==6;
     ssize_t result=kind==0 ? idle_store(&d,NULL,"all",3) :
         kind==1 ? writeback_store(&d,NULL,"huge",4) : recompress_store(&d,NULL," ",1);
-    assert(result==(scenario ? -EINTR : kind==0 ? 3 : kind==1 ? 4 : 1));
+    int error=scenario>=5 ? -EBUSY : scenario ? -EINTR : 0;
+    assert(result==(error ? error : kind==0 ? 3 : kind==1 ? 4 : 1));
     assert(locks==0 && z.init_lock==0 && z.pp_in_progress==0);
     assert(pages==0 && controls==0 && queued==0);
     for(int i=0;i<SLOTS;i++)assert(!(z.table[i].flags & ZRAM_PP_SLOT));
-    if(kind)assert(finishes==1 && finish_status==(scenario ? -EINTR : 0));
+    if(kind && scenario!=6)assert(finishes==1 && finish_status==error);
+    if(scenario==6)assert(finishes==0 && visits==0 && writebacks==0);
+    if(scenario==5)assert(visits==256 && writebacks==0);
     if(scenario==1)assert(visits==0 && processed==0 && writebacks==0);
     if(scenario==2)assert(visits==73 && processed==0 && writebacks==0);
     if(scenario==3)assert(visits==256 && processed==0 && writebacks==0);
@@ -183,12 +188,12 @@ for label,text in cases:
             '-Wno-sign-compare','-fsanitize=address,undefined',str(c),'-o',str(exe)],check=True)
         passed=failed=0
         for kind in range(3):
-            for scenario in range(5 if kind==2 else 4):
+            for scenario in (list(range(5 if kind==2 else 4)) + ([5,6] if kind==1 else [])):
                 for empty in (0,1):
                     if scenario==4 and empty:continue
                     r=subprocess.run([str(exe),str(kind),str(scenario),str(empty)],capture_output=True,text=True,timeout=5)
-                    # K91 lacks cancellation and rescheduling in these scans.
-                    expected=label=='current' or scenario==0
+                    # K93 cancels on signals but lacks launch deferral.
+                    expected=label=='current' or scenario<5
                     assert (r.returncode==0)==expected,(label,kind,scenario,empty,r.stdout,r.stderr)
                     if expected:passed+=1
                     else:failed+=1

@@ -8,6 +8,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/mem_boost.h>
 #include <linux/module.h>
 #include <linux/pagewalk.h>
 #include <linux/pid.h>
@@ -75,6 +76,10 @@ static int zram_process_walker(pmd_t *pmd, unsigned long start,
 	struct vm_area_struct *vma = walk->vma;
 	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
 	unsigned long addr;
+
+	if (private->cmd == ZRAM_ANDROID_IOC_PROCESS_RANGE_WRITEBACK &&
+	    mem_boost_active())
+		return -EBUSY;
 
 	if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd) || pmd_bad(*pmd))
 		return 0;
@@ -528,6 +533,9 @@ static int zram_ioctl_process_writeback(struct zram *zram,
 
 	if (!capable(CAP_SYS_NICE))
 		return -EPERM;
+
+	if (mem_boost_active())
+		return -EBUSY;
 
 	down_read(&zram->init_lock);
 	if (!zram->disksize) {

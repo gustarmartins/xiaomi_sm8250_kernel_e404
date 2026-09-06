@@ -21,6 +21,7 @@
 #include <linux/mm_inline.h>
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
+#include <linux/mem_boost.h>
 
 #include "internal.h"
 
@@ -396,6 +397,7 @@ ondemand_readahead(struct address_space *mapping,
 	 */
 	if (req_size > max_pages && bdi->io_pages > max_pages)
 		max_pages = min(req_size, bdi->io_pages);
+	max_pages = mem_boost_readahead_pages(max_pages);
 
 	/*
 	 * start of file

@@ -15,6 +15,15 @@ Description:
                 smaller machines). The floor is a best-effort observation,
                 not a reservation. No global VM sysctl is overwritten.
 
+                During modes 2 and 3, automatic file readahead/read-around
+                windows are capped at eight pages without changing the
+                configured per-file limit. Demand reads and explicit
+                readahead requests remain available. Zram writeback scans
+                and submissions defer with EBUSY, including ioctl writeback;
+                already submitted I/O drains before its owner returns.
+                This does not cancel outstanding I/O or block swap-in,
+                PAGEOUT, ordinary file writeback, or terminal rescue.
+
                 Disabled at boot. This interface neither frees memory on
                 its own nor bounds allocation latency. A userspace owner
                 must measure effectiveness before enabling it in a profile.

@@ -25,7 +25,8 @@ struct zram_prefetch_ctl { int num_inflight; uint64_t prefetched_pages; int done
 struct bio { void *bi_private, *bi_end_io; int bi_opf; struct { unsigned long bi_sector; } bi_iter; };
 struct zram_wb_req { struct page *page; unsigned long blk_idx; struct zram_pp_slot *pps; struct bio bio; int bio_vec; };
 struct zram_wb_ctl { int num_inflight, done_wait; struct list_head done_reqs; struct zram_wb_req req; };
-static bool cancelled;
+static bool cancelled, boosted;
+static bool mem_boost_active(void) { return boosted; }
 static int scenario, submits, completions, releases, live_pages;
 static struct page dummy;
 #define current NULL
@@ -55,7 +56,7 @@ static void simulated_completion(int *queue) {
     }
 }
 #define wait_event(q,c) do { if (!(c)) simulated_completion(&(q)); assert(c); } while (0)
-#define wait_event_killable(q,c) ({ int r=0; if (!(c)) { if (scenario==2) cancelled=true; if (cancelled) r=-EINTR; else simulated_completion(&(q)); } r; })
+#define wait_event_killable(q,c) ({ int r=0; if (!(c)) { if (scenario==2) cancelled=true; if (scenario==5) boosted=true; if (cancelled) r=-EINTR; else simulated_completion(&(q)); } r; })
 static struct zram_pp_slot *select_pp_slot(struct zram_pp_ctl *c) {
     for(int i=0;i<4;i++) if(c->slots[i].entry.present) return &c->slots[i];
     return NULL;
@@ -87,7 +88,7 @@ static void bio_set_dev(struct bio *b,void *d) { (void)b;(void)d; }
 static void __bio_add_page(struct bio *b,struct page *p,int n,int o) { (void)b;(void)p;(void)n;(void)o; }
 #define zram_writeback_endio NULL
 static void zram_submit_wb_request(struct zram *z,struct zram_wb_ctl *c,struct zram_wb_req *r) {
-    (void)z;(void)r;c->num_inflight++;submits++;if(scenario==1)cancelled=true;
+    (void)z;(void)r;c->num_inflight++;submits++;if(scenario==1)cancelled=true;if(scenario==4)boosted=true;
 }
 static void release_wb_req(struct zram_wb_req *r) { (void)r; }
 '''
@@ -108,7 +109,26 @@ int main(void) {
         int unsent=0;for(int i=0;i<4;i++) unsent+=pp.slots[i].entry.present;
         assert(unsent==4-submits); /* caller retains cleanup ownership */
     }
-    puts("PASS: cancelled ZRAM work stops submission and drains all live I/O");
+    for(scenario=4;scenario<=6;scenario++) {
+        struct zram z={.wb_batch_size=1};struct zram_pp_ctl pp={0};
+        struct zram_wb_ctl wb={.done_wait=18};
+        for(int i=0;i<4;i++) { pp.slots[i].index=i;pp.slots[i].entry.present=true; }
+        cancelled=false;boosted=scenario==6;submits=completions=releases=live_pages=0;
+        int result=zram_writeback_slots(&z,&pp,&wb);
+        assert(result==-EBUSY);
+        int expected=scenario==6 ? 0 : 1;
+        assert(submits==expected && completions==submits && releases==submits);
+        assert(wb.num_inflight==0 && live_pages==0);
+        int unsent=0;for(int i=0;i<4;i++) unsent+=pp.slots[i].entry.present;
+        assert(unsent==4-submits);
+    }
+    /* Launch deferral must not stop reads of already offloaded pages. */
+    struct zram z={.wb_batch_size=1};struct zram_pp_ctl pp={0};u64 prefetched=0;
+    for(int i=0;i<4;i++) { pp.slots[i].index=i;pp.slots[i].entry.present=true; }
+    scenario=0;boosted=true;cancelled=false;submits=completions=releases=live_pages=0;
+    assert(zram_prefetch_slots(&z,&pp,&prefetched)==0 && prefetched==4);
+    assert(submits==4 && completions==4 && live_pages==0);
+    puts("PASS: cancellation and launch deferral drain I/O; swap prefetch remains available");
 }
 '''
 def extract(text):
