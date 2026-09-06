@@ -47,7 +47,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
 
 obj-$(CONFIG_DEBUG_KERNEL)	+= debug.o
 
-obj-y += init-mm.o
+obj-y += init-mm.o mem_boost.o
 
 ifdef CONFIG_NO_BOOTMEM
 	obj-y		+= nobootmem.o

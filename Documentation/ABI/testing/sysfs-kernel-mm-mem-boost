@@ -1,0 +1,20 @@
+What:           /sys/kernel/mm/mem_boost_mode
+Date:           September 2026
+Contact:        E404 munch maintainers
+Description:
+                Root-writable, experimental launch hint. Values 0..3 are
+                accepted. Zero cancels the hint; 1 is compatibility-only;
+                2 and 3 prefer file reclaim in background kswapd for at most
+                five seconds after each write. Value 3 does not kill tasks.
+                Readback returns zero after expiry without a reset write.
+
+                Applies to both legacy LRU and MGLRU. It leaves direct,
+                proactive, memcg-targeted and priority-zero reclaim alone.
+                Normal reclaim resumes below a file-LRU floor of 500 MiB
+                on machines with at least 4 GiB RAM (400/300/200 MiB on
+                smaller machines). The floor is a best-effort observation,
+                not a reservation. No global VM sysctl is overwritten.
+
+                Disabled at boot. This interface neither frees memory on
+                its own nor bounds allocation latency. A userspace owner
+                must measure effectiveness before enabling it in a profile.

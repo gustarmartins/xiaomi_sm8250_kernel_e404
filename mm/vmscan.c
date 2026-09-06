@@ -15,6 +15,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mm.h>
+#include <linux/mem_boost.h>
 #include <linux/sched/mm.h>
 #include <linux/module.h>
 #include <linux/gfp.h>
@@ -2506,6 +2507,13 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 		goto out;
 	}
 
+	/* A launch hint must not constrain direct or last-priority reclaim. */
+	if (current_is_kswapd() && global_reclaim(sc) &&
+	    !sc->proactive && sc->priority && mem_boost_file_reclaim()) {
+		scan_balance = SCAN_FILE;
+		goto out;
+	}
+
 	/*
 	 * Prevent the reclaimer from falling into the cache trap: as
 	 * cache pages start out inactive, every cache fault will tip
@@ -2743,6 +2751,11 @@ static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 
 	/* Keep swapping available until the memcg has actually exhausted it. */
 	if (mem_cgroup_get_nr_swap_pages(memcg) <= 0)
+		return 0;
+
+	/* MGLRU bypasses get_scan_count(), so apply the same hint here. */
+	if (current_is_kswapd() && global_reclaim(sc) &&
+	    !sc->proactive && sc->priority && mem_boost_file_reclaim())
 		return 0;
 
 	return swappiness;
