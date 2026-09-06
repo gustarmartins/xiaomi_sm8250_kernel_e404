@@ -64,11 +64,19 @@ static ssize_t mem_boost_mode_store(struct kobject *kobj,
 {
 	unsigned int mode;
 	unsigned long flags;
+	bool acquire = sysfs_streq(buf, "try2");
 
-	if (kstrtouint(buf, 10, &mode) || mode > 3)
+	if (acquire)
+		mode = 2;
+	else if (kstrtouint(buf, 10, &mode) || mode > 3)
 		return -EINVAL;
 
 	write_seqlock_irqsave(&mem_boost_lock, flags);
+	if (acquire && mem_boost_mode &&
+	    time_before(jiffies, mem_boost_expires)) {
+		write_sequnlock_irqrestore(&mem_boost_lock, flags);
+		return -EBUSY;
+	}
 	mem_boost_mode = mode;
 	mem_boost_expires = jiffies + MEM_BOOST_DURATION;
 	write_sequnlock_irqrestore(&mem_boost_lock, flags);
@@ -78,8 +86,27 @@ static ssize_t mem_boost_mode_store(struct kobject *kobj,
 static struct kobj_attribute mem_boost_mode_attr =
 	__ATTR(mem_boost_mode, 0600, mem_boost_mode_show, mem_boost_mode_store);
 
+static ssize_t mem_boost_contract_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "e404-launch-io-v1 5000\n");
+}
+
+static struct kobj_attribute mem_boost_contract_attr =
+	__ATTR(mem_boost_contract, 0444, mem_boost_contract_show, NULL);
+
+static struct attribute *mem_boost_attrs[] = {
+	&mem_boost_mode_attr.attr,
+	&mem_boost_contract_attr.attr,
+	NULL,
+};
+
+static const struct attribute_group mem_boost_group = {
+	.attrs = mem_boost_attrs,
+};
+
 static int __init mem_boost_init(void)
 {
-	return sysfs_create_file(mm_kobj, &mem_boost_mode_attr.attr);
+	return sysfs_create_group(mm_kobj, &mem_boost_group);
 }
 subsys_initcall(mem_boost_init);
