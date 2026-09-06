@@ -899,6 +899,29 @@ TRACE_EVENT(rss_stat,
 		__entry->member,
 		__entry->size)
 	);
+TRACE_EVENT(mm_vm_policy_write,
+
+	TP_PROTO(const char *name, int old_value, int new_value, int error),
+
+	TP_ARGS(name, old_value, new_value, error),
+
+	TP_STRUCT__entry(
+		__string(name, name)
+		__field(int, old_value)
+		__field(int, new_value)
+		__field(int, error)
+	),
+
+	TP_fast_assign(
+		__assign_str(name, name);
+		__entry->old_value = old_value;
+		__entry->new_value = new_value;
+		__entry->error = error;
+	),
+
+	TP_printk("%s old=%d new=%d error=%d", __get_str(name),
+		  __entry->old_value, __entry->new_value, __entry->error)
+);
 #endif /* _TRACE_KMEM_H */
 
 /* This part must be outside protection */

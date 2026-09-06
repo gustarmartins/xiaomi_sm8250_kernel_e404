@@ -1,0 +1,17 @@
+VM policy write attribution
+===========================
+
+Enable events/kmem/mm_vm_policy_write/enable in a tracefs instance to record
+userspace sysctl writes to min_free_kbytes, extra_free_kbytes,
+watermark_scale_factor and swappiness. The normal trace prefix identifies the
+calling task and PID; the payload records the knob, observed before/after
+integer values and the parser result (zero means success).
+
+This event is disabled by default and does not change policy or serialize
+writers. Before/after values are observations, so concurrent writes can affect
+them. Failed writes are recorded too. It does not report direct in-kernel
+assignments, such as initial watermark sizing during boot.
+
+Use this event to identify an unexpected writer before changing its owner.
+Do not infer authorship from a kernel value alone, or introduce a second loop
+that continually overwrites another owner's settings.

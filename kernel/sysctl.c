@@ -69,6 +69,7 @@
 #include <linux/mount.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/userfaultfd_k.h>
+#include <trace/events/kmem.h>
 
 #include "../lib/kstrtox.h"
 
@@ -3192,8 +3193,20 @@ int proc_dointvec_minmax(struct ctl_table *table, int write,
 		.min = (int *) table->extra1,
 		.max = (int *) table->extra2,
 	};
-	return do_proc_dointvec(table, write, buffer, lenp, ppos,
-				do_proc_dointvec_minmax_conv, &param);
+	bool audit = write && trace_mm_vm_policy_write_enabled() &&
+		(table->data == &min_free_kbytes ||
+		 table->data == &extra_free_kbytes ||
+		 table->data == &watermark_scale_factor ||
+		 table->data == &vm_swappiness);
+	int old_value = audit ? READ_ONCE(*(int *)table->data) : 0;
+	int ret;
+
+	ret = do_proc_dointvec(table, write, buffer, lenp, ppos,
+			      do_proc_dointvec_minmax_conv, &param);
+	if (audit)
+		trace_mm_vm_policy_write(table->procname, old_value,
+					READ_ONCE(*(int *)table->data), ret);
+	return ret;
 }
 
 /**
