@@ -7,6 +7,7 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #include <linux/err.h>
+#include <linux/sched.h>
 #include <drm/drm_notifier_mi.h>
 
 #include "msm_drv.h"
@@ -59,6 +60,15 @@ static const struct of_device_id dsi_display_dt_match[] = {
 struct dsi_display *primary_display;
 
 static unsigned int cur_refresh_rate = 60;
+
+static void dsi_display_publish_refresh(struct dsi_display *display, u32 fps)
+{
+	if (strcmp(display->display_type, "primary"))
+		return;
+
+	WRITE_ONCE(cur_refresh_rate, fps);
+	sched_set_refresh_rate((enum fps)fps);
+}
 
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
 			u32 mask, bool enable)
@@ -4789,7 +4799,7 @@ static int dsi_display_dfps_update(struct dsi_display *display,
 	 * active mode.
 	 */
 	panel_mode->dsi_mode_flags = 0;
-	WRITE_ONCE(cur_refresh_rate, timing->refresh_rate);
+	dsi_display_publish_refresh(display, timing->refresh_rate);
 
 error:
 	SDE_EVT32(SDE_EVTLOG_FUNC_EXIT);
@@ -8102,13 +8112,14 @@ int dsi_display_enable(struct dsi_display *display)
 					display->name, rc);
 		}
 
+		dsi_display_publish_refresh(display,
+			display->panel->cur_mode->timing.refresh_rate);
 		return 0;
 	}
 
 	mutex_lock(&display->display_lock);
 
 	mode = display->panel->cur_mode;
-	WRITE_ONCE(cur_refresh_rate, mode->timing.refresh_rate);
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {
 		rc = dsi_panel_switch(display->panel);
@@ -8199,6 +8210,8 @@ int dsi_display_enable(struct dsi_display *display)
 error_disable_panel:
 	(void)dsi_panel_disable(display->panel);
 error:
+	if (!rc)
+		dsi_display_publish_refresh(display, mode->timing.refresh_rate);
 	mutex_unlock(&display->display_lock);
 	SDE_EVT32(SDE_EVTLOG_FUNC_EXIT);
 	return rc;

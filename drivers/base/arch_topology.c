@@ -17,6 +17,7 @@
 #include <linux/sched/topology.h>
 #include <linux/sched/sysctl.h>
 #include <linux/cpuset.h>
+#include <linux/spinlock.h>
 
 bool topology_scale_freq_invariant(void)
 {
@@ -88,14 +89,36 @@ void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
 }
 
 DEFINE_PER_CPU(unsigned long, thermal_pressure);
+static DEFINE_PER_CPU(unsigned long[THERMAL_PRESSURE_SOURCES], thermal_sources);
+static DEFINE_RAW_SPINLOCK(thermal_pressure_lock);
+
+void arch_set_thermal_pressure_source(const struct cpumask *cpus,
+		unsigned long pressure, enum thermal_pressure_source source)
+{
+	unsigned long flags;
+	int cpu, i;
+
+	if (WARN_ON_ONCE(source >= THERMAL_PRESSURE_SOURCES))
+		return;
+
+	/* A recovery notification must release only its own contribution. */
+	raw_spin_lock_irqsave(&thermal_pressure_lock, flags);
+	for_each_cpu(cpu, cpus) {
+		unsigned long combined = 0;
+
+		per_cpu(thermal_sources, cpu)[source] = pressure;
+		for (i = 0; i < THERMAL_PRESSURE_SOURCES; i++)
+			combined = max(combined, per_cpu(thermal_sources, cpu)[i]);
+		WRITE_ONCE(per_cpu(thermal_pressure, cpu), combined);
+	}
+	raw_spin_unlock_irqrestore(&thermal_pressure_lock, flags);
+}
 
 void arch_set_thermal_pressure(struct cpumask *cpus,
 			       unsigned long th_pressure)
 {
-	int cpu;
-
-	for_each_cpu(cpu, cpus)
-		WRITE_ONCE(per_cpu(thermal_pressure, cpu), th_pressure);
+	arch_set_thermal_pressure_source(cpus, th_pressure,
+					 THERMAL_PRESSURE_COOLING);
 }
 
 static ssize_t cpu_capacity_show(struct device *dev,

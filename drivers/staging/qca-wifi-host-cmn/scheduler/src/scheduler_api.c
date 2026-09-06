@@ -78,7 +78,9 @@ static void scheduler_watchdog_timeout(void *arg)
 	if (qdf_atomic_test_bit(MC_SHUTDOWN_EVENT_MASK, &sched->sch_event_flag))
 		return;
 
-	QDF_DEBUG_PANIC("Going down for Scheduler Watchdog Bite!");
+	/* Recovery runs on the CDS workqueue, not in this timer interrupt. */
+	sched_err("Scheduler watchdog expired; requesting WLAN recovery");
+	qdf_trigger_self_recovery(NULL, QDF_REASON_UNSPECIFIED);
 }
 
 QDF_STATUS scheduler_enable(void)

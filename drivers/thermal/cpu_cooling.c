@@ -442,7 +442,7 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 	max_capacity = arch_scale_cpu_capacity(cpumask_first(cpus));
 	capacity = clip_freq * max_capacity;
 	capacity /= cpufreq_cdev->policy->cpuinfo.max_freq;
-	arch_set_thermal_pressure(cpus, max_capacity - capacity);
+	arch_set_thermal_pressure(cpus, max_capacity - min(max_capacity, capacity));
 
 	/* Check if the device has a platform mitigation function that
 	 * can handle the CPU freq mitigation, if not, notify cpufreq

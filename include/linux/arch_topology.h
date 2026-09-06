@@ -59,4 +59,13 @@ static inline unsigned long topology_get_thermal_pressure(int cpu)
 
 void arch_set_thermal_pressure(struct cpumask *cpus,
 			       unsigned long th_pressure);
+
+enum thermal_pressure_source {
+	THERMAL_PRESSURE_COOLING,
+	THERMAL_PRESSURE_DCVSH,
+	THERMAL_PRESSURE_SOURCES,
+};
+
+void arch_set_thermal_pressure_source(const struct cpumask *cpus,
+		unsigned long pressure, enum thermal_pressure_source source);
 #endif /* _LINUX_ARCH_TOPOLOGY_H_ */

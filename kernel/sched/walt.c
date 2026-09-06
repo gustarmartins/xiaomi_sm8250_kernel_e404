@@ -113,6 +113,7 @@ static unsigned int display_sched_ravg_window_nr_ticks =
 	(HZ / NR_WINDOWS_PER_SEC);
 
 unsigned int sysctl_sched_dynamic_ravg_window_enable = (HZ == 250);
+unsigned int sched_display_refresh_rate;
 
 /* Window size (in ns) */
 __read_mostly unsigned int sched_ravg_window = DEFAULT_SCHED_RAVG_WINDOW;
@@ -3698,10 +3699,11 @@ static inline void sched_window_nr_ticks_change(void)
 
 	spin_lock_irqsave(&sched_ravg_window_lock, flags);
 
-	new_ticks = min(display_sched_ravg_window_nr_ticks,
-			sysctl_sched_ravg_window_nr_ticks);
-
-	new_sched_ravg_window = new_ticks * (NSEC_PER_SEC / HZ);
+	if (HZ == 250 && READ_ONCE(sysctl_sched_dynamic_ravg_window_enable)) {
+		new_ticks = min(display_sched_ravg_window_nr_ticks,
+				READ_ONCE(sysctl_sched_ravg_window_nr_ticks));
+		new_sched_ravg_window = new_ticks * (NSEC_PER_SEC / HZ);
+	}
 	spin_unlock_irqrestore(&sched_ravg_window_lock, flags);
 }
 
@@ -3732,18 +3734,34 @@ unlock:
 
 void sched_set_refresh_rate(enum fps fps)
 {
-	if (HZ == 250 && sysctl_sched_dynamic_ravg_window_enable) {
-		if (fps > FPS90)
-			display_sched_ravg_window_nr_ticks = 2;
-		else if (fps == FPS90)
-			display_sched_ravg_window_nr_ticks = 3;
-		else
-			display_sched_ravg_window_nr_ticks = 5;
+	unsigned long flags;
 
-		sched_window_nr_ticks_change();
-	}
+	if (fps <= FPS0)
+		return;
+
+	/* Remember the applied mode even while automatic updates are disabled. */
+	spin_lock_irqsave(&sched_ravg_window_lock, flags);
+	WRITE_ONCE(sched_display_refresh_rate, (unsigned int)fps);
+	if (fps > FPS90)
+		display_sched_ravg_window_nr_ticks = 2;
+	else if (fps == FPS90)
+		display_sched_ravg_window_nr_ticks = 3;
+	else
+		display_sched_ravg_window_nr_ticks = 5;
+	spin_unlock_irqrestore(&sched_ravg_window_lock, flags);
+	sched_window_nr_ticks_change();
 }
 EXPORT_SYMBOL(sched_set_refresh_rate);
+
+int sched_dynamic_window_handler(struct ctl_table *table, int write,
+			void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+
+	if (!ret && write)
+		sched_window_nr_ticks_change();
+	return ret;
+}
 
 /* Migration margins */
 unsigned int sysctl_sched_capacity_margin_up[MAX_MARGIN_LEVELS] = {

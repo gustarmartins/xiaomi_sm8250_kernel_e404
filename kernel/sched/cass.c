@@ -181,6 +181,7 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync, bool rt
 	int this_cpu = raw_smp_processor_id();
 	unsigned long p_util, uc_min;
 	bool has_idle = false;
+	bool latency_sensitive = uclamp_latency_sensitive(p);
 	int cidx = 0, cpu, prev_llc_id;
 
 	/*
@@ -227,7 +228,8 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync, bool rt
 		curr->cap_orig = arch_scale_cpu_capacity(cpu);
 
 		/* Get the _current_, throttled maximum capacity of this CPU */
-		curr->cap_max = curr->cap_orig - thermal_load_avg(rq);
+		curr->cap_max = curr->cap_orig -
+			min_t(u64, thermal_load_avg(rq), curr->cap_orig - 1);
 
 		/* Prefer the CPU that more closely meets the uclamp minimum */
 		if (curr->cap_max < uc_min && curr->cap_max < best->cap_max)
@@ -245,12 +247,14 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync, bool rt
 			 * A non-idle candidate may be better for energy
 			 * efficiency when @p is uclamp boosted above @curr's
 			 * minimum capacity, or when the only idle candidate
-			 * found so far is the prime CPU. Otherwise, prefer idle
-			 * candidates.
+			 * found so far is the prime CPU. Latency-sensitive tasks
+			 * prefer an idle CPU that fits their demand and clamp.
 			 */
 			if (!has_idle &&
-			    uc_min <= arch_scale_min_freq_capacity(cpu) &&
-			    !cass_prime_cpu(curr)) {
+			    ((latency_sensitive && curr->cap_max >= uc_min &&
+			      fits_capacity(p_util, curr->cap_max)) ||
+			     (uc_min <= arch_scale_min_freq_capacity(cpu) &&
+			      !cass_prime_cpu(curr)))) {
 				/* Discard any previous non-idle candidate */
 				best = curr;
 				has_idle = true;
