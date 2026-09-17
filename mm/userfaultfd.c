@@ -24,12 +24,13 @@
  * Install PTEs, to map dst_addr (within dst_vma) to page.
  *
  * This function handles both MCOPY_ATOMIC_NORMAL and _CONTINUE for both shmem
- * and anon, and for both shared and private VMAs.
+ * and anon, and for both shared and private VMAs. A non-NULL memcg is a
+ * pending anonymous charge: commit it only once installation cannot fail.
  */
 int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
 			     struct vm_area_struct *dst_vma,
 			     unsigned long dst_addr, struct page *page,
-			     bool newly_allocated)
+			     bool newly_allocated, struct mem_cgroup *memcg)
 {
 	int ret;
 	pte_t _dst_pte, *dst_pte;
@@ -74,6 +75,14 @@ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
 	 * PageAnon()), which is set by __page_set_anon_rmap().
 	 */
 	inc_mm_counter(dst_mm, mm_counter(page));
+
+	/*
+	 * Rmap must be set before committing the charge. Commit before LRU
+	 * insertion (which can drain a full pagevec) and before publishing the
+	 * PTE, so neither reclaim nor an unmapping task sees an uncharged page.
+	 */
+	if (memcg)
+		mem_cgroup_commit_charge(page, memcg, false, false);
 
 	if (newly_allocated)
 		lru_cache_add_active_or_unevictable(page, dst_vma);
@@ -138,12 +147,11 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
 		goto out_release;
 
 	ret = mfill_atomic_install_pte(dst_mm, dst_pmd, dst_vma, dst_addr,
-				       page, true);
+				       page, true, memcg);
 	if (ret) {
 		mem_cgroup_cancel_charge(page, memcg, false);
 		goto out_release;
 	}
-	mem_cgroup_commit_charge(page, memcg, false, false);
 out:
 	return ret;
 out_release:
@@ -206,7 +214,7 @@ static int mcontinue_atomic_pte(struct mm_struct *dst_mm,
 	}
 
 	ret = mfill_atomic_install_pte(dst_mm, dst_pmd, dst_vma, dst_addr,
-				       page, false);
+				       page, false, NULL);
 	if (ret)
 		goto out_release;
 
@@ -721,4 +729,3 @@ ssize_t mcopy_continue(struct mm_struct *dst_mm, unsigned long start,
 	return __mcopy_atomic(dst_mm, start, 0, len, MCOPY_ATOMIC_CONTINUE,
 			      mmap_changing);
 }
-

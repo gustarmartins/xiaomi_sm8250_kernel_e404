@@ -102,6 +102,38 @@ static __always_inline enum lru_list page_lru(struct page *page)
 
 #ifdef CONFIG_LRU_GEN
 
+extern atomic_long_t lru_gen_size_underflow;
+extern atomic_long_t lru_gen_size_underflow_pages;
+extern atomic_long_t lru_gen_underflow_delete;
+extern atomic_long_t lru_gen_underflow_promote;
+extern atomic_long_t lru_gen_underflow_memcg_mismatch;
+extern atomic_long_t lru_gen_underflow_type_mismatch;
+extern atomic_long_t lru_gen_underflow_last_lruvec_memcg;
+extern atomic_long_t lru_gen_underflow_last_page_memcg;
+extern atomic_long_t lru_gen_underflow_last_old_gen;
+extern atomic_long_t lru_gen_underflow_last_new_gen;
+extern atomic_long_t lru_gen_underflow_last_type;
+extern atomic_long_t lru_gen_underflow_last_zone;
+
+enum lru_gen_update_reason {
+	LRU_GEN_UPDATE_ADD,
+	LRU_GEN_UPDATE_DEL,
+	LRU_GEN_UPDATE_INC,
+	LRU_GEN_UPDATE_PTE,
+	LRU_GEN_UPDATE_RMAP,
+	NR_LRU_GEN_UPDATE_REASONS,
+};
+
+extern atomic_long_t lru_gen_underflow_reason[NR_LRU_GEN_UPDATE_REASONS];
+extern atomic_long_t lru_gen_underflow_first_reason;
+void lru_gen_record_transition(struct lruvec *lruvec, struct page *page,
+			      int old_gen, int new_gen, int type,
+			      enum lru_gen_update_reason reason);
+void lru_gen_report_first_underflow(struct lruvec *lruvec, struct page *page,
+				    long old_size, int old_gen, int new_gen,
+				    int type, int zone,
+				    enum lru_gen_update_reason reason);
+
 static inline bool lru_gen_enabled(void)
 {
 #ifdef CONFIG_LRU_GEN_ENABLED
@@ -170,7 +202,8 @@ static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
 }
 
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
-			       int old_gen, int new_gen, int type)
+			       int old_gen, int new_gen, int type,
+			       enum lru_gen_update_reason reason)
 {
 	int zone = page_zonenum(page);
 	int delta = hpage_nr_pages(page);
@@ -181,9 +214,48 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
 	VM_BUG_ON(new_gen != -1 && new_gen >= MAX_NR_GENS);
 	VM_BUG_ON(old_gen == -1 && new_gen == -1);
 
-	if (old_gen >= 0)
+	lru_gen_record_transition(lruvec, page, old_gen, new_gen, type, reason);
+
+	if (old_gen >= 0) {
+		long old_size = (long)READ_ONCE(lrugen->nr_pages[old_gen][type][zone]);
+
+		if (unlikely(old_size < delta)) {
+			struct mem_cgroup *lru_memcg = lruvec_memcg(lruvec);
+			struct mem_cgroup *page_cgroup = page_memcg(page);
+			int flags_type = page_flags_is_file_cache(READ_ONCE(page->flags));
+
+			if (old_size >= 0) {
+				atomic_long_inc(&lru_gen_size_underflow);
+				atomic_long_add(delta - old_size,
+						&lru_gen_size_underflow_pages);
+				if (atomic_long_cmpxchg(&lru_gen_underflow_first_reason,
+							     -1, reason) == -1)
+					lru_gen_report_first_underflow(lruvec, page,
+								       old_size, old_gen,
+								       new_gen, type,
+								       zone, reason);
+			}
+			atomic_long_inc(&lru_gen_underflow_reason[reason]);
+			if (new_gen < 0)
+				atomic_long_inc(&lru_gen_underflow_delete);
+			else
+				atomic_long_inc(&lru_gen_underflow_promote);
+			if (lru_memcg != page_cgroup)
+				atomic_long_inc(&lru_gen_underflow_memcg_mismatch);
+			if (type != flags_type)
+				atomic_long_inc(&lru_gen_underflow_type_mismatch);
+			atomic_long_set(&lru_gen_underflow_last_lruvec_memcg,
+					lru_memcg ? mem_cgroup_id(lru_memcg) : -1);
+			atomic_long_set(&lru_gen_underflow_last_page_memcg,
+					page_cgroup ? mem_cgroup_id(page_cgroup) : -1);
+			atomic_long_set(&lru_gen_underflow_last_old_gen, old_gen);
+			atomic_long_set(&lru_gen_underflow_last_new_gen, new_gen);
+			atomic_long_set(&lru_gen_underflow_last_type, type);
+			atomic_long_set(&lru_gen_underflow_last_zone, zone);
+		}
 		WRITE_ONCE(lrugen->nr_pages[old_gen][type][zone],
 			   lrugen->nr_pages[old_gen][type][zone] - delta);
+	}
 	if (new_gen >= 0)
 		WRITE_ONCE(lrugen->nr_pages[new_gen][type][zone],
 			   lrugen->nr_pages[new_gen][type][zone] + delta);
@@ -260,7 +332,7 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 		new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 
-	lru_gen_update_size(lruvec, page, -1, gen, type);
+	lru_gen_update_size(lruvec, page, -1, gen, type, LRU_GEN_UPDATE_ADD);
 	/* for rotate_reclaimable_page() */
 	if (reclaiming)
 		list_add_tail(&page->lru, &lrugen->lists[gen][type][zone]);
@@ -297,7 +369,7 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 
 	/* Account deletion against the type in the CAS-linearized state. */
 	type = page_flags_is_file_cache(old_flags);
-	lru_gen_update_size(lruvec, page, gen, -1, type);
+	lru_gen_update_size(lruvec, page, gen, -1, type, LRU_GEN_UPDATE_DEL);
 	list_del(&page->lru);
 
 	return true;
