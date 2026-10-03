@@ -957,9 +957,11 @@ static int psy_chg_get_ti_alarm_status(struct ln8000_info *info)
 
 static int psy_chg_get_ti_fault_status(struct ln8000_info *info)
 {
-	int fault;
+	int fault, ret;
 
-	ln8000_check_status(info);
+	ret = ln8000_check_status(info);
+	if (ret < 0)
+		return ret;
 
 	/* BAT ocp fault status not suppport */
 	fault = ((info->vbat_ov << BAT_OVP_FAULT_SHIFT) |
@@ -986,6 +988,7 @@ static int ln8000_charger_get_property(struct power_supply *psy,
 				       union power_supply_propval *val)
 {
 	struct ln8000_info *info = power_supply_get_drvdata(psy);
+	int ret;
 
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
@@ -1016,7 +1019,9 @@ static int ln8000_charger_get_property(struct power_supply *psy,
 		val->intval = !(info->vac_unplug);
 		break;
 	case POWER_SUPPLY_PROP_TI_BATTERY_VOLTAGE:
-		ln8000_get_adc_data(info, LN8000_ADC_CH_VBAT, &info->vbat_uV);
+		ret = ln8000_get_adc_data(info, LN8000_ADC_CH_VBAT, &info->vbat_uV);
+		if (ret < 0)
+			return ret;
 		val->intval = info->vbat_uV / 1000;
 		break;
 	case POWER_SUPPLY_PROP_TI_BATTERY_CURRENT: /* ln8000 not support IBAT_ADC */
@@ -1064,7 +1069,10 @@ static int ln8000_charger_get_property(struct power_supply *psy,
 		val->intval = psy_chg_get_ti_alarm_status(info);
 		break;
 	case POWER_SUPPLY_PROP_TI_FAULT_STATUS:
-		val->intval = psy_chg_get_ti_fault_status(info);
+		ret = psy_chg_get_ti_fault_status(info);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;
 		break;
 	case POWER_SUPPLY_PROP_TI_REG_STATUS:
 		ln8000_check_status(info);

@@ -23,6 +23,7 @@ enum pm_state {
 	PD_PM_STATE_FC2_ENTRY_3,
 	PD_PM_STATE_FC2_TUNE,
 	PD_PM_STATE_FC2_EXIT,
+	PD_PM_STATE_FC2_VOLTAGE_WAIT,
 };
 
 #define BAT_OVP_FAULT_SHIFT 0
@@ -246,6 +247,9 @@ struct usbpd_pm {
 	unsigned int transient_fault_recoveries;
 	unsigned int stale_pps_rearms;
 	bool terminal_exit;
+	bool voltage_recovery_pending;
+	int admission_read_error;
+	const char *last_stop_reason;
 
 	struct notifier_block nb;
 

@@ -55,6 +55,7 @@
 #define PM_WORK_RUN_CRITICAL_INTERVAL 100
 #define PM_WORK_RUN_FAULT_RECOVERY_INTERVAL 5000
 #define PM_WORK_RUN_STALE_REARM_INTERVAL 1000
+#define PM_WORK_RUN_ADMISSION_WAIT_INTERVAL 5000
 int pd_log_count_poussin = 0;
 
 enum {
@@ -274,6 +275,29 @@ static int pd_get_batt_capacity(struct usbpd_pm *pdpm, int *capacity)
 	return rc;
 }
 
+/* Do not turn a failed SOC/thermal/ADC read into a terminal exit or admission. */
+static int usbpd_pm_refresh_admission(struct usbpd_pm *pdpm, int *capacity,
+				      int *thermal_level)
+{
+	union power_supply_propval val = {0, };
+	int ret;
+
+	ret = pd_get_batt_capacity(pdpm, capacity);
+	if (ret < 0)
+		return ret;
+	ret = pd_get_batt_current_thermal_level(pdpm, thermal_level);
+	if (ret < 0)
+		return ret;
+	if (!pdpm->cp_psy)
+		return -ENODEV;
+	ret = power_supply_get_property(pdpm->cp_psy,
+			POWER_SUPPLY_PROP_TI_BATTERY_VOLTAGE, &val);
+	if (ret < 0)
+		return ret;
+	pdpm->cp.vbat_volt = val.intval;
+	return 0;
+}
+
 static void pd_bq_check_ibus_to_enable_dual_bq(struct usbpd_pm *pdpm,
 					       int ibus_ma)
 {
@@ -327,12 +351,14 @@ static bool pd_disable_cp_by_jeita_status(struct usbpd_pm *pdpm)
 	int rc;
 
 	if (!pdpm->sw_psy)
-		return false;
+		return true;
 
 	rc = power_supply_get_property(pdpm->sw_psy,
 				       POWER_SUPPLY_PROP_INPUT_SUSPEND, &pval);
 	if (!rc)
 		bq_input_suspend = !!pval.intval;
+	else
+		return true;
 
 	pr_err("bq_input_suspend: %d\n", bq_input_suspend);
 
@@ -341,13 +367,13 @@ static bool pd_disable_cp_by_jeita_status(struct usbpd_pm *pdpm)
 		return true;
 
 	if (!pdpm->bms_psy)
-		return false;
+		return true;
 
 	rc = power_supply_get_property(pdpm->bms_psy, POWER_SUPPLY_PROP_TEMP,
 				       &pval);
 	if (rc < 0) {
 		pr_info("Couldn't get batt temp prop:%d\n", rc);
-		return false;
+		return true;
 	}
 	pdpm->cp.bms_batt_temp = pval.intval;
 	batt_temp = pval.intval;
@@ -1338,6 +1364,7 @@ static const unsigned char *pm_str[] = {
 	"PD_PM_STATE_FC2_ENTRY_1", "PD_PM_STATE_FC2_ENTRY_2",
 	"PD_PM_STATE_FC2_ENTRY_3", "PD_PM_STATE_FC2_TUNE",
 	"PD_PM_STATE_FC2_EXIT",
+	"PD_PM_STATE_FC2_VOLTAGE_WAIT",
 };
 
 static void usbpd_pm_move_state(struct usbpd_pm *pdpm, enum pm_state state)
@@ -1356,7 +1383,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 	static bool stop_sw;
 	static bool recover;
 	int effective_fcc_val = 0;
-	int thermal_level = 0, capacity;
+	int thermal_level = 0, capacity = 0;
 	static int curr_fcc_lmt, curr_ibus_lmt, retry_count;
 
 	switch (pdpm->state) {
@@ -1364,17 +1391,23 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 		stop_sw = false;
 		recover = false;
 		pdpm->terminal_exit = false;
+		pdpm->voltage_recovery_pending = false;
+		pdpm->admission_read_error = usbpd_pm_refresh_admission(pdpm,
+						 &capacity, &thermal_level);
+		if (pdpm->admission_read_error < 0) {
+			pdpm->last_stop_reason = "admission-read-error";
+			pdpm->recovery_delay_ms = PM_WORK_RUN_ADMISSION_WAIT_INTERVAL;
+			break;
+		}
 
 		usbpd_pm_check_night_charging_enabled(pdpm);
 		/* update new fcc from bms charge current */
 		usbpd_set_new_fcc_voter(pdpm);
-		pd_get_batt_current_thermal_level(pdpm, &thermal_level);
 		pdpm->is_temp_out_fc2_range =
 			pd_disable_cp_by_jeita_status(pdpm);
 		usbpd_pm_check_sec_batt_present(pdpm);
 		pr_err("is_temp_out_fc2_range:%d\n",
 		       pdpm->is_temp_out_fc2_range);
-		pd_get_batt_capacity(pdpm, &capacity);
 		usbpd_pm_check_cp_bus_ovp(pdpm, 1);
 		effective_fcc_val = usbpd_get_effective_fcc_val(pdpm);
 
@@ -1388,15 +1421,24 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 		if (pdpm->cp.vbat_volt < pm_config.min_vbat_for_cp) {
 			pr_err("batt_volt %d, waiting...\n",
 			       pdpm->cp.vbat_volt);
-		} else if ((pdpm->cp.vbat_volt >
+		} else if (capacity >= CAPACITY_TOO_HIGH_THR) {
+			pdpm->last_stop_reason = "high-soc";
+			pdpm->terminal_exit = true;
+			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
+		} else if (pdpm->cp.vbat_volt >
 				    pm_config.bat_volt_lp_lmt -
 					    VBAT_HIGH_FOR_FC_HYS_MV &&
-			    !pdpm->is_temp_out_fc2_range) ||
-			   capacity >= CAPACITY_TOO_HIGH_THR) {
+			    !pdpm->is_temp_out_fc2_range) {
 			pr_err("batt_volt %d is too high for cp,\
 					charging with switch charger\n",
 			       pdpm->cp.vbat_volt);
-			pdpm->terminal_exit = true;
+			/* Voltage under charge can fall after load/thermal changes.
+			 * Keep switch charging and recheck the existing entry limit;
+			 * this is not taper completion for the entire cable session.
+			 */
+			pdpm->last_stop_reason = "entry-voltage-wait";
+			pdpm->voltage_recovery_pending = true;
+			recover = true;
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 		} else if (!pd_get_bms_digest_verified(pdpm)) {
 			pr_err("bms digest is not verified, waiting...\n");
@@ -1417,6 +1459,33 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			pr_err("batt_volt-%d is ok, start flash charging\n",
 			       pdpm->cp.vbat_volt);
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_ENTRY);
+		}
+		break;
+
+	case PD_PM_STATE_FC2_VOLTAGE_WAIT:
+		pdpm->recovery_delay_ms = PM_WORK_RUN_ADMISSION_WAIT_INTERVAL;
+		pdpm->admission_read_error = usbpd_pm_refresh_admission(pdpm,
+						 &capacity, &thermal_level);
+		if (pdpm->admission_read_error < 0)
+			break;
+		if (capacity >= CAPACITY_TOO_HIGH_THR) {
+			pdpm->voltage_recovery_pending = false;
+			pdpm->terminal_exit = true;
+			pdpm->last_stop_reason = "high-soc";
+			recover = false;
+			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
+			break;
+		}
+		pdpm->is_temp_out_fc2_range = pd_disable_cp_by_jeita_status(pdpm);
+		usbpd_pm_check_night_charging_enabled(pdpm);
+		if (pdpm->cp.vbat_volt >= pm_config.min_vbat_for_cp &&
+		    pdpm->cp.vbat_volt <= pm_config.bat_volt_lp_lmt -
+					VBAT_HIGH_FOR_FC_HYS_MV &&
+		    thermal_level < pdpm->therm_level_threshold &&
+		    !pdpm->is_temp_out_fc2_range && !pdpm->sw.night_charging) {
+			pdpm->voltage_recovery_pending = false;
+			pdpm->recovery_delay_ms = 0;
+			usbpd_pm_move_state(pdpm, PD_PM_STATE_ENTRY);
 		}
 		break;
 
@@ -1559,6 +1628,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			pr_info("Move to stop charging:%d\n", ret);
 			stop_sw = true;
 			pdpm->terminal_exit = true;
+			pdpm->last_stop_reason = "thermal-fault";
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 			break;
 		} else if (usbpd_get_current_state(pdpm->pd) == 1) {
@@ -1572,6 +1642,7 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_ENTRY_1);
 			break;
 		} else if (ret == PM_ALGO_RET_OTHER_FAULT) {
+			pdpm->last_stop_reason = "transient-fault";
 			/*
 			 * A transient charge-pump or gauge fault used to share
 			 * the terminal path with taper completion. That stopped
@@ -1593,6 +1664,8 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 			   ret == PM_ALGO_RET_UNSUPPORT_PPSTA) {
 			pr_err("Move to switch charging:%d\n", ret);
 			pdpm->terminal_exit = true;
+			pdpm->last_stop_reason = ret == PM_ALGO_RET_TAPER_DONE ?
+						"taper-done" : "unsupported-pps";
 			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
 			break;
 		} else if (ret == PM_ALGO_RET_CHG_DISABLED) {
@@ -1694,7 +1767,8 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 #endif
 
 		if (recover)
-			usbpd_pm_move_state(pdpm, PD_PM_STATE_ENTRY);
+			usbpd_pm_move_state(pdpm, pdpm->voltage_recovery_pending ?
+				PD_PM_STATE_FC2_VOLTAGE_WAIT : PD_PM_STATE_ENTRY);
 		else
 			rc = 1;
 
@@ -1767,6 +1841,9 @@ static void usbpd_pm_disconnect(struct usbpd_pm *pdpm)
 	pdpm->chip_ok_count = 0;
 	pdpm->recovery_delay_ms = 0;
 	pdpm->transient_fault_recoveries = 0;
+	pdpm->voltage_recovery_pending = false;
+	pdpm->admission_read_error = 0;
+	pdpm->last_stop_reason = "disconnected";
 	pdpm->terminal_exit = false;
 	memset(&pdpm->pdo, 0, sizeof(pdpm->pdo));
 	pm_config.bat_curr_lp_lmt = pdpm->bat_curr_max;
@@ -1927,6 +2004,34 @@ static int usbpd_psy_notifier_cb(struct notifier_block *nb, unsigned long event,
 	return NOTIFY_OK;
 }
 
+static ssize_t charge_state_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct usbpd_pm *pdpm = dev_get_drvdata(dev);
+	const char *reason;
+	unsigned int state;
+
+	if (!pdpm)
+		return -ENODEV;
+	state = READ_ONCE(pdpm->state);
+	reason = READ_ONCE(pdpm->last_stop_reason);
+	return scnprintf(buf, PAGE_SIZE,
+		"state=%s terminal=%d voltage_wait=%d read_error=%d retry_ms=%u "
+		"fault_recoveries=%u stale_rearms=%u request_mv=%d request_ma=%d "
+		"cp_vbat_mv=%d bms_vbat_mv=%d cp_enabled=%d exit_reason=%s\n",
+		state < ARRAY_SIZE(pm_str) ? (const char *)pm_str[state] : "unknown",
+		READ_ONCE(pdpm->terminal_exit),
+		READ_ONCE(pdpm->voltage_recovery_pending),
+		READ_ONCE(pdpm->admission_read_error),
+		READ_ONCE(pdpm->recovery_delay_ms),
+		READ_ONCE(pdpm->transient_fault_recoveries),
+		READ_ONCE(pdpm->stale_pps_rearms),
+		READ_ONCE(pdpm->request_voltage), READ_ONCE(pdpm->request_current),
+		READ_ONCE(pdpm->cp.vbat_volt), READ_ONCE(pdpm->cp.bms_vbat_mv),
+		READ_ONCE(pdpm->cp.charge_enabled), reason ? reason : "none");
+}
+static DEVICE_ATTR_RO(charge_state);
+
 static int pd_policy_parse_dt(struct usbpd_pm *pdpm)
 {
 	struct device_node *node = pdpm->dev->of_node;
@@ -2070,6 +2175,9 @@ static int usbpd_pm_probe(struct platform_device *pdev)
 	ret = power_supply_reg_notifier(&pdpm->nb);
 	if (ret)
 		goto err_destroy_wq;
+	ret = device_create_file(dev, &dev_attr_charge_state);
+	if (ret)
+		dev_warn(dev, "Charging state observation unavailable: %d\n", ret);
 
 	/*
 	 * The PD engine can publish PD_ACTIVE before this late-init policy
@@ -2097,6 +2205,7 @@ err_free:
 
 static int usbpd_pm_remove(struct platform_device *pdev)
 {
+	device_remove_file(&pdev->dev, &dev_attr_charge_state);
 	power_supply_unreg_notifier(&__pdpm->nb);
 	cancel_delayed_work_sync(&__pdpm->pm_work);
 	cancel_work_sync(&__pdpm->cp_psy_change_work);
