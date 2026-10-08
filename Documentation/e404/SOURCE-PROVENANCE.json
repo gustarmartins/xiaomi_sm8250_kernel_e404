@@ -29,5 +29,13 @@
     "No bit-for-bit rebuild performed during publication",
     "K108 mglru_history.h has no independent build-time hash",
     "Experimental charging candidate built October 3, not installed in retained receipt"
-  ]
+  ],
+  "experimental_candidate": {
+    "commit": "9bc38d5dbd8665b66d91468082a7bd55948ecb2a",
+    "original_commit": "f3f7f6a73a43d6831952c5134fe18ed469171f89",
+    "build_date": "2026-10-03",
+    "installed": false,
+    "kernel_release": "4.19.404R-K112-A17-SELSCOPE-WALT-CASS-RKSU32473-rc1chg1",
+    "preserved_image_sha256": "8d0123e64b029559627118f2f223d984d278b30db2bd2d032b9afe9a68e97d3e"
+  }
 }

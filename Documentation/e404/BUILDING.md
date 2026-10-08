@@ -1,3 +1,5 @@
+> This experimental branch defaults to `configs/k112-charging-experimental.config` and `LOCALVERSION=-rc1chg1`, matching the Clang/LLD 23.1.1 candidate. The recoveryfix1 commands below document its installed baseline.
+
 # Building the published Munch source
 
 This is a non-GKI, device-specific Linux 4.19 kernel for Poco F4 (`munch`). An Android version string or a changed `uname` string does not turn it into a 5.10/GKI kernel.

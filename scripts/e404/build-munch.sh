@@ -7,7 +7,7 @@ if [[ ${1:-} == --help ]]; then
     cat <<'HELP'
 Usage: scripts/e404/build-munch.sh [--prepare-only]
 Environment: OUT (new output dir), JOBS (default 2), CC (default clang),
-CONFIG (default archived K112 config), LOCALVERSION (default -recoveryfix1),
+CONFIG (default archived K112 config), LOCALVERSION (default -rc1chg1),
 KERNEL_BUILD_LOCK (default shared cryomgr-build-budget.lock).
 Provide LLVM tools and aarch64-linux-gnu-/arm-linux-gnueabi- tools on PATH.
 HELP
@@ -15,7 +15,7 @@ HELP
 fi
 [[ $# == 0 || ( $# == 1 && $1 == --prepare-only ) ]] || { echo 'Unknown arguments' >&2; exit 2; }
 OUT=${OUT:-"$ROOT/out-public"}
-CONFIG=${CONFIG:-"$ROOT/Documentation/e404/configs/k112-recoveryfix1.config"}
+CONFIG=${CONFIG:-"$ROOT/Documentation/e404/configs/k112-charging-experimental.config"}
 JOBS=${JOBS:-2}
 [[ $JOBS =~ ^[1-9][0-9]*$ ]] || { echo 'JOBS must be positive' >&2; exit 2; }
 [[ -f "$ROOT/KernelSU/kernel/feature/selinux_query.c" ]] || { echo 'Get the pinned KernelSU submodule or complete-source archive first.' >&2; exit 1; }
@@ -32,7 +32,7 @@ export KBUILD_BUILD_USER=${KBUILD_BUILD_USER:-builder}
 export KBUILD_BUILD_HOST=${KBUILD_BUILD_HOST:-munch}
 args=(-C "$ROOT" O="$OUT" LLVM=1 LLVM_IAS=1 "CC=${CC:-clang}"
       CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-      "LOCALVERSION=${LOCALVERSION:--recoveryfix1}")
+      "LOCALVERSION=${LOCALVERSION:--rc1chg1}")
 make "${args[@]}" olddefconfig
 [[ ${1:-} == --prepare-only ]] && exit 0
 make "${args[@]}" -j"$JOBS" Image

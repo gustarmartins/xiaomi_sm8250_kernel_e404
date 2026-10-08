@@ -1,3 +1,5 @@
+> **Experimental PPS/LN8000 candidate:** built October 3, not installed or hardware-qualified in the retained evidence. For the preserved installed source use [`public/munch-current`](https://github.com/gustarmartins/xiaomi_sm8250_kernel_e404/tree/public/munch-current).
+
 # E404 for Poco F4 / munch
 
 My E404-based kernel work for Poco F4, developed alongside CryoManager/CryoD. The main focus is memory management: making the Linux 4.19 MGLRU backport behave correctly, improving targeted reclaim and ZRAM, and keeping the phone responsive with more apps alive.
