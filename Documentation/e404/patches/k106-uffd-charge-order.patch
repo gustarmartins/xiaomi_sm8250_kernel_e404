@@ -1,0 +1,114 @@
+From 5078e7f1ed46e39a5d9b6bb2829baabf02aed9d3 Mon Sep 17 00:00:00 2001
+From: Mekki <gufavmartins@hotmail.com>
+Date: Thu, 17 Sep 2026 20:08:01 -0300
+Subject: [PATCH] source: record K108 export snapshot for isolated upstream
+ repairs
+
+Snapshot tree: 03bd903ade3c5b7db2ca0330749d302f9eec1ff9
+Base source HEAD: 9f2791203eebce1f8ad74203ef7e64ff67c3be74
+Contains the recorded K108 tracked source patch and required mglru_history.h.
+See releases/e404-k108-20260917/SOURCE_MANIFEST.json in the Poco workspace.
+The header lacks an independent build-time hash; this snapshot is not
+bit-for-bit rebuild proof. Subsequent upstream repairs are post-K108 and unbuilt.
+---
+ include/linux/userfaultfd_k.h |  3 ++-
+ mm/shmem.c                    |  2 +-
+ mm/userfaultfd.c              | 19 +++++++++++++------
+ 3 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/include/linux/userfaultfd_k.h b/include/linux/userfaultfd_k.h
+index 6e5ad81075ba..cf23213a7a64 100644
+--- a/include/linux/userfaultfd_k.h
++++ b/include/linux/userfaultfd_k.h
+@@ -52,10 +52,11 @@ enum mcopy_atomic_mode {
+ 	MCOPY_ATOMIC_CONTINUE,
+ };
+ 
++struct mem_cgroup;
+ extern int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 				    struct vm_area_struct *dst_vma,
+ 				    unsigned long dst_addr, struct page *page,
+-				    bool newly_allocated);
++				    bool newly_allocated, struct mem_cgroup *memcg);
+ 
+ extern ssize_t mcopy_atomic(struct mm_struct *dst_mm, unsigned long dst_start,
+ 			    unsigned long src_start, unsigned long len,
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 307d2c14efc8..d5467de02d9c 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -2363,7 +2363,7 @@ int shmem_mfill_atomic_pte(struct mm_struct *dst_mm,
+ 	mem_cgroup_commit_charge(page, memcg, false, false);
+ 
+ 	ret = mfill_atomic_install_pte(dst_mm, dst_pmd, dst_vma, dst_addr,
+-				       page, true);
++				       page, true, NULL);
+ 	if (ret)
+ 		goto out_delete_from_cache;
+ 
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index b62b929f18f9..84fb8fabef0d 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -24,12 +24,13 @@
+  * Install PTEs, to map dst_addr (within dst_vma) to page.
+  *
+  * This function handles both MCOPY_ATOMIC_NORMAL and _CONTINUE for both shmem
+- * and anon, and for both shared and private VMAs.
++ * and anon, and for both shared and private VMAs. A non-NULL memcg is a
++ * pending anonymous charge: commit it only once installation cannot fail.
+  */
+ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 			     struct vm_area_struct *dst_vma,
+ 			     unsigned long dst_addr, struct page *page,
+-			     bool newly_allocated)
++			     bool newly_allocated, struct mem_cgroup *memcg)
+ {
+ 	int ret;
+ 	pte_t _dst_pte, *dst_pte;
+@@ -75,6 +76,14 @@ int mfill_atomic_install_pte(struct mm_struct *dst_mm, pmd_t *dst_pmd,
+ 	 */
+ 	inc_mm_counter(dst_mm, mm_counter(page));
+ 
++	/*
++	 * Rmap must be set before committing the charge. Commit before LRU
++	 * insertion (which can drain a full pagevec) and before publishing the
++	 * PTE, so neither reclaim nor an unmapping task sees an uncharged page.
++	 */
++	if (memcg)
++		mem_cgroup_commit_charge(page, memcg, false, false);
++
+ 	if (newly_allocated)
+ 		lru_cache_add_active_or_unevictable(page, dst_vma);
+ 
+@@ -138,12 +147,11 @@ static int mcopy_atomic_pte(struct mm_struct *dst_mm,
+ 		goto out_release;
+ 
+ 	ret = mfill_atomic_install_pte(dst_mm, dst_pmd, dst_vma, dst_addr,
+-				       page, true);
++				       page, true, memcg);
+ 	if (ret) {
+ 		mem_cgroup_cancel_charge(page, memcg, false);
+ 		goto out_release;
+ 	}
+-	mem_cgroup_commit_charge(page, memcg, false, false);
+ out:
+ 	return ret;
+ out_release:
+@@ -206,7 +214,7 @@ static int mcontinue_atomic_pte(struct mm_struct *dst_mm,
+ 	}
+ 
+ 	ret = mfill_atomic_install_pte(dst_mm, dst_pmd, dst_vma, dst_addr,
+-				       page, false);
++				       page, false, NULL);
+ 	if (ret)
+ 		goto out_release;
+ 
+@@ -721,4 +729,3 @@ ssize_t mcopy_continue(struct mm_struct *dst_mm, unsigned long start,
+ 	return __mcopy_atomic(dst_mm, start, 0, len, MCOPY_ATOMIC_CONTINUE,
+ 			      mmap_changing);
+ }
+-
+-- 
+2.56.0
+

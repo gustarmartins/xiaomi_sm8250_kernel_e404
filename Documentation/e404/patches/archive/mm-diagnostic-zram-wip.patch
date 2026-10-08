@@ -1,0 +1,50 @@
+diff --git a/drivers/block/zram/backend_zstd.c b/drivers/block/zram/backend_zstd.c
+index a18a187651a7..d4aad24748c1 100644
+--- a/drivers/block/zram/backend_zstd.c
++++ b/drivers/block/zram/backend_zstd.c
+@@ -64,6 +64,15 @@ static int zstd_setup_params(struct zcomp_params *params)
+ 
+ 	zp->cprm = zstd_get_params(params->level, PAGE_SIZE);
+ 
++	/*
++	 * The ordinary, dictionary-free ZRAM path uses the workspace-backed
++	 * contexts created in zstd_create().  Trying to create a CDict/DDict for
++	 * a NULL, zero-length dictionary makes that path fail before any stream
++	 * can be allocated, so a selected zstd compressor could never initialize.
++	 */
++	if (!params->dict_sz)
++		return 0;
++
+ 	zp->custom_mem.customAlloc = zstd_custom_alloc;
+ 	zp->custom_mem.customFree = zstd_custom_free;
+ 
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index c168b26dd907..6d60994814ae 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -100,7 +100,7 @@ ssize_t zcomp_available_show(const char *comp, char *buf, ssize_t at)
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(backends) - 1; i++) {
+-		if (!strcmp(comp, backends[i]->name)) {
++		if (comp && !strcmp(comp, backends[i]->name)) {
+ 			at += sysfs_emit_at(buf, at, "[%s] ",
+ 					    backends[i]->name);
+ 		} else {
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index b487ea327182..a1516a9b0b17 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -2463,6 +2463,12 @@ static ssize_t disksize_store(struct device *dev,
+ 
+ out_free_comps:
+ 	zram_destroy_comps(zram);
++	/*
++	 * zram_destroy_comps() also clears comp_algs[].  Keep sysfs readable and
++	 * leave the uninitialized device retryable after a backend allocation
++	 * failure instead of passing NULL to comp_algorithm_show().
++	 */
++	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
+ 	zram_meta_free(zram, disksize);
+ out_unlock:
+ 	up_write(&zram->init_lock);

@@ -1,0 +1,33 @@
+{
+  "publication_date": "2026-10-08",
+  "scope": "Preserved K112 recoveryfix1 source, not a new binary release",
+  "source_snapshot_commit": "3309f81eb4ef29650fbe66122bd46d3ef48a1830",
+  "historical_base_commit": "95caa3a0ed3fee0bf9c3c813facefe41a59e789c",
+  "kernelsu_commit": "c2c455aa2acefd719ce0836b206105c38b04bc53",
+  "kernel_release": "4.19.404R-K112-A17-SELSCOPE-WALT-CASS-RKSU32473-recoveryfix1",
+  "preserved_image_sha256": "60b5f632c34631c6ab499ad2211f1db9a4c873e06844e12342e33f6bdd9465d8",
+  "preserved_config_sha256": "833d99bf3b6bbb38f8bd5c1215ef97cec6912a8ea288049d56f5872f2a96f09d",
+  "preserved_build_date": "2026-09-27",
+  "preserved_compiler": "Clang 22.1.8, LLD 22.1.8",
+  "device_evidence": "Retained October 3 readback identifies this kernel; October 8 ADB unavailable",
+  "critical_source_sha256": {
+    "kernel/sys.c": "c50681a1c4da974809a94d3291b202f733148f2fd48f37ce13a096cd28b05db7",
+    "security/selinux/hooks.c": "35247634fa450daa460e45e6ef529c8afc1ccfb01fea01adf4ead5a2b0e3d582",
+    "security/selinux/include/security.h": "64390b9673378c8d5c9bb0a7d9089283f568993790ddbc2f106ba6a46c57bc04",
+    "security/selinux/selinuxfs.c": "44b813b1419ef226865285a21c31676437316490f84f995ac6c57d88399630d9",
+    "security/selinux/ss/policydb.h": "a44181a8a9dc8112fb393d04608f8d41438330a45c58502b8aff242382246dc2",
+    "security/selinux/ss/services.c": "e38b38b6e3436473936ab81a554db74769452a5d40cd5fcd972bee796463d289",
+    "security/selinux/ss/compat_query.c": "e8497b43688e08d4472fce5e4743679402d1a1ab9d2726e2f2fb734267492119",
+    "include/linux/mm_inline.h": "fa9b3ad14034dfb667c03b2fe43b9a129f5fc18c78e0165ca5457e096bf17e64",
+    "include/linux/userfaultfd_k.h": "015c986508200343acc04c2af1fdf264b6af529f7e36c866f362b5e73f76b2ab",
+    "mm/shmem.c": "47333177832d5ebea90026b9e5111aac5926e47d6096703b600890113b04e72f",
+    "mm/userfaultfd.c": "54a650141d700384e75745e4ad26dc1af8488afeef3777ab141ec5c5750255e7",
+    "mm/vmscan.c": "06432d42d63f9cf85f2390d4d14f97a1dc5292efa53a5563c3d7982f85b4aaa5",
+    "mm/mglru_history.h": "005de2c2a3257769aba9d13777e9620dbbeb3bd1cab0d50978a18838cb1a8d5f"
+  },
+  "limits": [
+    "No bit-for-bit rebuild performed during publication",
+    "K108 mglru_history.h has no independent build-time hash",
+    "Experimental charging candidate built October 3, not installed in retained receipt"
+  ]
+}

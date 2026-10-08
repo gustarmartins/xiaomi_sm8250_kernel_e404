@@ -1,0 +1,150 @@
+diff --git a/kernel/sys.c b/kernel/sys.c
+index a928a9002e29..0e9add93bbea 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1243,7 +1243,6 @@ static int override_release(char __user *release, size_t len)
+ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+ {
+ 	struct new_utsname tmp;
+-	uid_t cur_uid = current_uid().val;
+ 
+ 	down_read(&uts_sem);
+ 	memcpy(&tmp, utsname(), sizeof(tmp));
+@@ -1254,9 +1253,7 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
+ 		strcpy(tmp.release, "5.10.404");
+ 		pr_info("fake uname: %s/%d release=%s\n",
+ 			 current->comm, current->pid, tmp.release);
+-	} else if (cur_uid >= 1000) {
+-        strlcpy(tmp.release, "5.10.404R", sizeof(tmp.release));
+-    }
++	}
+ 	up_read(&uts_sem);
+ 	if (copy_to_user(name, &tmp, sizeof(tmp)))
+ 		return -EFAULT;
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 9492d380b699..e938ccbfb03c 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -6448,6 +6448,13 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ 			str[size-1] = 0;
+ 			size--;
+ 		}
++#if IS_BUILTIN(CONFIG_KSU)
++		if (!strcmp(name, "current") && security_compat_active()) {
++			error = security_compat_context(value, size, NULL, NULL);
++			if (error)
++				return error;
++		}
++#endif
+ 		error = security_context_to_sid(&selinux_state, value, size,
+ 						&sid, GFP_KERNEL);
+ 		if (error == -EINVAL && !strcmp(name, "fscreate")) {
+diff --git a/security/selinux/include/security.h b/security/selinux/include/security.h
+index 6f471e9fb8f2..fe857aabf8c6 100644
+--- a/security/selinux/include/security.h
++++ b/security/selinux/include/security.h
+@@ -280,6 +280,17 @@ void security_compute_xperms_decision(struct selinux_state *state,
+ 				      u8 driver,
+ 				      struct extended_perms_decision *xpermd);
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++void security_compat_capture_stock(void);
++void security_compat_invalidate(void);
++bool security_compat_get_enabled(void);
++int security_compat_set_enabled(bool enabled);
++bool security_compat_active(void);
++int security_compat_context(const char *text, u32 len, char **canon, u32 *canon_len);
++int security_compat_access(const char *source, const char *target, u16 tclass,
++                          struct av_decision *avd);
++#endif
++
+ void security_compute_av_user(struct selinux_state *state,
+ 			      u32 ssid, u32 tsid,
+ 			      u16 tclass, struct av_decision *avd);
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index 09a38209b384..1a1eb7ba7fa7 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -614,6 +614,15 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++	if (security_compat_active()) {
++		length = security_compat_context(buf, size, &canon, &len);
++		if (length)
++			goto out;
++		goto canonical;
++	}
++#endif
++
+ 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -622,6 +631,9 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++canonical:
++#endif
+ 	length = -ERANGE;
+ 	if (len > SIMPLE_TRANSACTION_LIMIT) {
+ 		pr_err("SELinux: %s:  context size (%u) exceeds "
+@@ -850,6 +862,15 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++	if (security_compat_active()) {
++		length = security_compat_access(scon, tcon, tclass, &avd);
++		if (length)
++			goto out;
++		goto decision;
++	}
++#endif
++
+ 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
+ 	if (length)
+ 		goto out;
+@@ -860,6 +881,9 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+ 
+ 	security_compute_av_user(state, ssid, tsid, tclass, &avd);
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++decision:
++#endif
+ 	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
+ 			  "%x %x %x %x %u %x",
+ 			  avd.allowed, 0xffffffff,
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index ba25cf04f7f1..1941659f191c 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -2291,6 +2291,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len)
+ 	/* Save the old policydb and SID table to free later. */
+ 	memcpy(oldpolicydb, policydb, sizeof(*policydb));
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++	security_compat_invalidate();
++#endif
+ 	/* Install the new policydb and SID table. */
+ 	write_lock_irq(&state->ss->policy_rwlock);
+ 	memcpy(policydb, newpolicydb, sizeof(*policydb));
+@@ -2956,6 +2959,10 @@ int security_set_bools(struct selinux_state *state, int len, int *values)
+ 	if (len != lenp)
+ 		goto out;
+ 
++#if IS_BUILTIN(CONFIG_KSU)
++	/* Also invalidate if a later conditional evaluation fails partially. */
++	security_compat_invalidate();
++#endif
+ 	for (i = 0; i < len; i++) {
+ 		if (!!values[i] != policydb->bool_val_to_struct[i]->state) {
+ 			audit_log(audit_context(), GFP_ATOMIC,
+@@ -3808,3 +3815,5 @@ int security_read_policy(struct selinux_state *state,
+ 	return 0;
+ 
+ }
++
++#include "compat_query.c"

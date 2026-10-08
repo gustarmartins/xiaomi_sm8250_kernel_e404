@@ -1,0 +1,575 @@
+From 5078e7f1ed46e39a5d9b6bb2829baabf02aed9d3 Mon Sep 17 00:00:00 2001
+From: Mekki <gufavmartins@hotmail.com>
+Date: Thu, 17 Sep 2026 20:08:01 -0300
+Subject: [PATCH] source: record K108 export snapshot for isolated upstream
+ repairs
+
+Snapshot tree: 03bd903ade3c5b7db2ca0330749d302f9eec1ff9
+Base source HEAD: 9f2791203eebce1f8ad74203ef7e64ff67c3be74
+Contains the recorded K108 tracked source patch and required mglru_history.h.
+See releases/e404-k108-20260917/SOURCE_MANIFEST.json in the Poco workspace.
+The header lacks an independent build-time hash; this snapshot is not
+bit-for-bit rebuild proof. Subsequent upstream repairs are post-K108 and unbuilt.
+---
+ include/linux/mm_inline.h |  80 +++++++++++-
+ mm/mglru_history.h        |  48 +++++++
+ mm/vmscan.c               | 266 ++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 382 insertions(+), 12 deletions(-)
+ create mode 100644 mm/mglru_history.h
+
+diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
+index fe72e4d1d761..e7e88a1eff91 100644
+--- a/include/linux/mm_inline.h
++++ b/include/linux/mm_inline.h
+@@ -102,6 +102,38 @@ static __always_inline enum lru_list page_lru(struct page *page)
+ 
+ #ifdef CONFIG_LRU_GEN
+ 
++extern atomic_long_t lru_gen_size_underflow;
++extern atomic_long_t lru_gen_size_underflow_pages;
++extern atomic_long_t lru_gen_underflow_delete;
++extern atomic_long_t lru_gen_underflow_promote;
++extern atomic_long_t lru_gen_underflow_memcg_mismatch;
++extern atomic_long_t lru_gen_underflow_type_mismatch;
++extern atomic_long_t lru_gen_underflow_last_lruvec_memcg;
++extern atomic_long_t lru_gen_underflow_last_page_memcg;
++extern atomic_long_t lru_gen_underflow_last_old_gen;
++extern atomic_long_t lru_gen_underflow_last_new_gen;
++extern atomic_long_t lru_gen_underflow_last_type;
++extern atomic_long_t lru_gen_underflow_last_zone;
++
++enum lru_gen_update_reason {
++	LRU_GEN_UPDATE_ADD,
++	LRU_GEN_UPDATE_DEL,
++	LRU_GEN_UPDATE_INC,
++	LRU_GEN_UPDATE_PTE,
++	LRU_GEN_UPDATE_RMAP,
++	NR_LRU_GEN_UPDATE_REASONS,
++};
++
++extern atomic_long_t lru_gen_underflow_reason[NR_LRU_GEN_UPDATE_REASONS];
++extern atomic_long_t lru_gen_underflow_first_reason;
++void lru_gen_record_transition(struct lruvec *lruvec, struct page *page,
++			      int old_gen, int new_gen, int type,
++			      enum lru_gen_update_reason reason);
++void lru_gen_report_first_underflow(struct lruvec *lruvec, struct page *page,
++				    long old_size, int old_gen, int new_gen,
++				    int type, int zone,
++				    enum lru_gen_update_reason reason);
++
+ static inline bool lru_gen_enabled(void)
+ {
+ #ifdef CONFIG_LRU_GEN_ENABLED
+@@ -170,7 +202,8 @@ static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
+ }
+ 
+ static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
+-			       int old_gen, int new_gen, int type)
++			       int old_gen, int new_gen, int type,
++			       enum lru_gen_update_reason reason)
+ {
+ 	int zone = page_zonenum(page);
+ 	int delta = hpage_nr_pages(page);
+@@ -181,9 +214,48 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct page *page,
+ 	VM_BUG_ON(new_gen != -1 && new_gen >= MAX_NR_GENS);
+ 	VM_BUG_ON(old_gen == -1 && new_gen == -1);
+ 
+-	if (old_gen >= 0)
++	lru_gen_record_transition(lruvec, page, old_gen, new_gen, type, reason);
++
++	if (old_gen >= 0) {
++		long old_size = (long)READ_ONCE(lrugen->nr_pages[old_gen][type][zone]);
++
++		if (unlikely(old_size < delta)) {
++			struct mem_cgroup *lru_memcg = lruvec_memcg(lruvec);
++			struct mem_cgroup *page_cgroup = page_memcg(page);
++			int flags_type = page_flags_is_file_cache(READ_ONCE(page->flags));
++
++			if (old_size >= 0) {
++				atomic_long_inc(&lru_gen_size_underflow);
++				atomic_long_add(delta - old_size,
++						&lru_gen_size_underflow_pages);
++				if (atomic_long_cmpxchg(&lru_gen_underflow_first_reason,
++							     -1, reason) == -1)
++					lru_gen_report_first_underflow(lruvec, page,
++								       old_size, old_gen,
++								       new_gen, type,
++								       zone, reason);
++			}
++			atomic_long_inc(&lru_gen_underflow_reason[reason]);
++			if (new_gen < 0)
++				atomic_long_inc(&lru_gen_underflow_delete);
++			else
++				atomic_long_inc(&lru_gen_underflow_promote);
++			if (lru_memcg != page_cgroup)
++				atomic_long_inc(&lru_gen_underflow_memcg_mismatch);
++			if (type != flags_type)
++				atomic_long_inc(&lru_gen_underflow_type_mismatch);
++			atomic_long_set(&lru_gen_underflow_last_lruvec_memcg,
++					lru_memcg ? mem_cgroup_id(lru_memcg) : -1);
++			atomic_long_set(&lru_gen_underflow_last_page_memcg,
++					page_cgroup ? mem_cgroup_id(page_cgroup) : -1);
++			atomic_long_set(&lru_gen_underflow_last_old_gen, old_gen);
++			atomic_long_set(&lru_gen_underflow_last_new_gen, new_gen);
++			atomic_long_set(&lru_gen_underflow_last_type, type);
++			atomic_long_set(&lru_gen_underflow_last_zone, zone);
++		}
+ 		WRITE_ONCE(lrugen->nr_pages[old_gen][type][zone],
+ 			   lrugen->nr_pages[old_gen][type][zone] - delta);
++	}
+ 	if (new_gen >= 0)
+ 		WRITE_ONCE(lrugen->nr_pages[new_gen][type][zone],
+ 			   lrugen->nr_pages[new_gen][type][zone] + delta);
+@@ -260,7 +332,7 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
+ 		new_flags |= (gen + 1UL) << LRU_GEN_PGOFF;
+ 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
+ 
+-	lru_gen_update_size(lruvec, page, -1, gen, type);
++	lru_gen_update_size(lruvec, page, -1, gen, type, LRU_GEN_UPDATE_ADD);
+ 	/* for rotate_reclaimable_page() */
+ 	if (reclaiming)
+ 		list_add_tail(&page->lru, &lrugen->lists[gen][type][zone]);
+@@ -297,7 +369,7 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
+ 
+ 	/* Account deletion against the type in the CAS-linearized state. */
+ 	type = page_flags_is_file_cache(old_flags);
+-	lru_gen_update_size(lruvec, page, gen, -1, type);
++	lru_gen_update_size(lruvec, page, gen, -1, type, LRU_GEN_UPDATE_DEL);
+ 	list_del(&page->lru);
+ 
+ 	return true;
+diff --git a/mm/mglru_history.h b/mm/mglru_history.h
+new file mode 100644
+index 000000000000..f71b66aca420
+--- /dev/null
++++ b/mm/mglru_history.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Temporary bounded diagnostic; callers serialize access with history_lock. */
++#define MGLRU_HISTORY_SLOTS 8192
++#define MGLRU_HISTORY_MATCHES 64
++
++struct mglru_history_event {
++	u64 sequence, timestamp;
++	unsigned long pfn, flags, caller, max_seq, min_seq;
++	long old_size, new_size;
++	int owner, charge, old_gen, new_gen, type, zone, delta, pid, reason;
++};
++
++struct mglru_history {
++	struct mglru_history_event ring[MGLRU_HISTORY_SLOTS];
++	struct mglru_history_event matches[MGLRU_HISTORY_MATCHES];
++	u64 count;
++	unsigned int matched, total_matches;
++	bool frozen;
++};
++
++static void mglru_history_push(struct mglru_history *history,
++			       struct mglru_history_event *event)
++{
++	if (history->frozen)
++		return;
++	event->sequence = ++history->count;
++	history->ring[(event->sequence - 1) % MGLRU_HISTORY_SLOTS] = *event;
++}
++
++/* Retain the newest matching records, in reverse chronological order. */
++static void mglru_history_freeze(struct mglru_history *history, unsigned long pfn)
++{
++	u64 offset, retained = min_t(u64, history->count, MGLRU_HISTORY_SLOTS);
++
++	if (history->frozen)
++		return;
++	WRITE_ONCE(history->frozen, true);
++	for (offset = 0; offset < retained; offset++) {
++		struct mglru_history_event *event =
++			&history->ring[(history->count - offset - 1) % MGLRU_HISTORY_SLOTS];
++
++		if (event->pfn != pfn)
++			continue;
++		history->total_matches++;
++		if (history->matched < MGLRU_HISTORY_MATCHES)
++			history->matches[history->matched++] = *event;
++	}
++}
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 0bd55d1c48ba..77db4b1c2772 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -58,6 +58,9 @@
+ #include <linux/shmem_fs.h>
+ #include <linux/ctype.h>
+ #include <linux/debugfs.h>
++#include <linux/proc_fs.h>
++#include <linux/timekeeping.h>
++#include <linux/workqueue.h>
+ 
+ #include <asm/tlbflush.h>
+ #include <asm/div64.h>
+@@ -2682,6 +2685,156 @@ DEFINE_STATIC_KEY_ARRAY_FALSE(lru_gen_caps, NR_LRU_GEN_CAPS);
+ #endif
+ DEFINE_STATIC_KEY_FALSE(lru_switch);
+ 
++atomic_long_t lru_gen_size_underflow = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_size_underflow_pages = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_underflow_delete = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_underflow_promote = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_underflow_memcg_mismatch = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_underflow_type_mismatch = ATOMIC_LONG_INIT(0);
++atomic_long_t lru_gen_underflow_last_lruvec_memcg = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_last_page_memcg = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_last_old_gen = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_last_new_gen = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_last_type = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_last_zone = ATOMIC_LONG_INIT(-1);
++atomic_long_t lru_gen_underflow_reason[NR_LRU_GEN_UPDATE_REASONS];
++atomic_long_t lru_gen_underflow_first_reason = ATOMIC_LONG_INIT(-1);
++static atomic_long_t lru_gen_batch_underflow = ATOMIC_LONG_INIT(0);
++static atomic_long_t lru_gen_batch_underflow_pages = ATOMIC_LONG_INIT(0);
++
++#include "mglru_history.h"
++static struct mglru_history lru_history;
++static DEFINE_SPINLOCK(lru_history_lock);
++static struct mglru_history_event lru_history_failure;
++static bool lru_history_ready;
++
++/* The ring is immutable after release publication by the first reporter. */
++static void *lru_history_start(struct seq_file *m, loff_t *pos)
++{
++	u64 retained, first;
++
++	if (!smp_load_acquire(&lru_history_ready))
++		return ERR_PTR(-EAGAIN);
++	retained = min_t(u64, lru_history.count, MGLRU_HISTORY_SLOTS);
++	if (*pos < 0 || *pos >= retained)
++		return NULL;
++	first = lru_history.count - retained;
++	return &lru_history.ring[(first + *pos) % MGLRU_HISTORY_SLOTS];
++}
++
++static void *lru_history_next(struct seq_file *m, void *v, loff_t *pos)
++{
++	++*pos;
++	return lru_history_start(m, pos);
++}
++
++static void lru_history_stop(struct seq_file *m, void *v)
++{
++}
++
++static int lru_history_show(struct seq_file *m, void *v)
++{
++	struct mglru_history_event *e = v;
++
++	seq_printf(m, "seq=%llu ns=%llu pfn=%lu caller=%px pid=%d op=%d owner=%d charge=%d gen=%d->%d type=%d zone=%d delta=%d old_before=%ld new_before=%ld min=%lu max=%lu flags_after=%#lx\n",
++		   e->sequence, e->timestamp, e->pfn, (void *)e->caller,
++		   e->pid, e->reason, e->owner, e->charge, e->old_gen,
++		   e->new_gen, e->type, e->zone, e->delta, e->old_size,
++		   e->new_size, e->min_seq, e->max_seq, e->flags);
++	return 0;
++}
++
++static const struct seq_operations lru_history_seq_ops = {
++	.start = lru_history_start, .next = lru_history_next,
++	.stop = lru_history_stop, .show = lru_history_show,
++};
++
++static int lru_history_open(struct inode *inode, struct file *file)
++{
++	return seq_open(file, &lru_history_seq_ops);
++}
++
++static const struct file_operations lru_history_fops = {
++	.open = lru_history_open, .read = seq_read,
++	.llseek = seq_lseek, .release = seq_release,
++};
++
++void lru_gen_record_transition(struct lruvec *lruvec, struct page *page,
++			      int old_gen, int new_gen, int type,
++			      enum lru_gen_update_reason reason)
++{
++	struct mglru_history_event event;
++	struct mem_cgroup *owner, *charge;
++	unsigned long irqflags;
++	int zone = page_zonenum(page);
++
++	/* One branch after the first failure; no allocation or logging here. */
++	if (READ_ONCE(lru_history.frozen))
++		return;
++	owner = lruvec_memcg(lruvec);
++	charge = page_memcg(page);
++	event = (struct mglru_history_event) {
++		.timestamp = ktime_get_mono_fast_ns(),
++		.pfn = page_to_pfn(page), .flags = READ_ONCE(page->flags),
++		.caller = _RET_IP_, .max_seq = lruvec->lrugen.max_seq,
++		.min_seq = lruvec->lrugen.min_seq[type],
++		.old_size = old_gen < 0 ? 0 : lruvec->lrugen.nr_pages[old_gen][type][zone],
++		.new_size = new_gen < 0 ? 0 : lruvec->lrugen.nr_pages[new_gen][type][zone],
++		.owner = owner ? mem_cgroup_id(owner) : 0,
++		.charge = charge ? mem_cgroup_id(charge) : 0,
++		.old_gen = old_gen, .new_gen = new_gen, .type = type, .zone = zone,
++		.delta = hpage_nr_pages(page), .pid = current->pid, .reason = reason,
++	};
++	spin_lock_irqsave(&lru_history_lock, irqflags);
++	mglru_history_push(&lru_history, &event);
++	spin_unlock_irqrestore(&lru_history_lock, irqflags);
++}
++
++static void lru_gen_print_history(struct work_struct *work)
++{
++	struct mglru_history_event *first = &lru_history_failure;
++	int i;
++
++	pr_err("MGLRU first size underflow: caller=%px reason=%d old_size=%ld old_gen=%d new_gen=%d type=%d zone=%d memcg=%d pfn=%lu flags=%#lx history_total=%llu retained=%llu matches=%u saved=%u\n",
++	       (void *)first->caller, first->reason, first->old_size,
++	       first->old_gen, first->new_gen, first->type, first->zone,
++	       first->owner, first->pfn, first->flags, lru_history.count,
++	       min_t(u64, lru_history.count, MGLRU_HISTORY_SLOTS),
++	       lru_history.total_matches, lru_history.matched);
++	for (i = lru_history.matched - 1; i >= 0; i--) {
++		struct mglru_history_event *e = &lru_history.matches[i];
++
++		pr_err("MGLRU history: seq=%llu ns=%llu pfn=%lu caller=%px pid=%d op=%d owner=%d charge=%d gen=%d->%d type=%d zone=%d delta=%d old_before=%ld new_before=%ld min=%lu max=%lu flags_after=%#lx\n",
++		       e->sequence, e->timestamp, e->pfn, (void *)e->caller,
++		       e->pid, e->reason, e->owner, e->charge, e->old_gen,
++		       e->new_gen, e->type, e->zone, e->delta, e->old_size,
++		       e->new_size, e->min_seq, e->max_seq, e->flags);
++	}
++}
++static DECLARE_WORK(lru_history_work, lru_gen_print_history);
++
++void lru_gen_report_first_underflow(struct lruvec *lruvec, struct page *page,
++				    long old_size, int old_gen, int new_gen,
++				    int type, int zone,
++				    enum lru_gen_update_reason reason)
++{
++	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
++	unsigned long irqflags;
++
++	spin_lock_irqsave(&lru_history_lock, irqflags);
++	lru_history_failure = (struct mglru_history_event) {
++		.caller = _RET_IP_, .reason = reason, .old_size = old_size,
++		.old_gen = old_gen, .new_gen = new_gen, .type = type, .zone = zone,
++		.owner = memcg ? mem_cgroup_id(memcg) : 0,
++		.pfn = page_to_pfn(page), .flags = READ_ONCE(page->flags),
++	};
++	mglru_history_freeze(&lru_history, page_to_pfn(page));
++	spin_unlock_irqrestore(&lru_history_lock, irqflags);
++	smp_store_release(&lru_history_ready, true);
++	/* Publish once to a worker; never printk/dump_stack under the LRU lock. */
++	schedule_work(&lru_history_work);
++}
++
+ /******************************************************************************
+  *                          shorthand helpers
+  ******************************************************************************/
+@@ -3287,7 +3440,8 @@ static int page_inc_gen(struct lruvec *lruvec, struct page *page, bool reclaimin
+ 			new_flags |= BIT(PG_reclaim);
+ 	} while (cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
+ 
+-	lru_gen_update_size(lruvec, page, old_gen, new_gen, type);
++	lru_gen_update_size(lruvec, page, old_gen, new_gen, type,
++			    LRU_GEN_UPDATE_INC);
+ 
+ 	return new_gen;
+ }
+@@ -3317,11 +3471,18 @@ static void reset_batch_size(struct lruvec *lruvec, struct lru_gen_mm_walk *walk
+ 	for_each_gen_type_zone(gen, type, zone) {
+ 		enum lru_list lru = type * LRU_INACTIVE_FILE;
+ 		int delta = walk->nr_pages[gen][type][zone];
++		long old_size;
+ 
+ 		if (!delta)
+ 			continue;
+ 
+ 		walk->nr_pages[gen][type][zone] = 0;
++		old_size = (long)READ_ONCE(lrugen->nr_pages[gen][type][zone]);
++		if (unlikely(delta < 0 && old_size >= 0 && old_size < -(long)delta)) {
++			atomic_long_inc(&lru_gen_batch_underflow);
++			atomic_long_add(-(long)delta - old_size,
++					&lru_gen_batch_underflow_pages);
++		}
+ 		WRITE_ONCE(lrugen->nr_pages[gen][type][zone],
+ 			   lrugen->nr_pages[gen][type][zone] + delta);
+ 
+@@ -3417,6 +3578,7 @@ static bool walk_pte_range(pmd_t *pmd, unsigned long start, unsigned long end,
+ 	pte_t *pte;
+ 	spinlock_t *ptl;
+ 	unsigned long addr;
++	DECLARE_BITMAP(promote, PTRS_PER_PTE) = {};
+ 	int total = 0;
+ 	int young = 0;
+ 	struct lru_gen_mm_walk *priv = walk->private;
+@@ -3479,14 +3641,43 @@ static bool walk_pte_range(pmd_t *pmd, unsigned long start, unsigned long end,
+ 		    !(PageAnon(page) && PageSwapBacked(page) && !PageSwapCache(page)))
+ 			set_page_dirty(page);
+ 
+-		old_gen = page_update_gen(page, new_gen, &type);
+-		if (old_gen >= 0 && old_gen != new_gen)
+-			update_batch_size(priv, page, old_gen, new_gen, type);
++		/* Commit the flag and counter transition together below. */
++		__set_bit(i, promote);
+ 	}
+ 
+ 	if (i < PTRS_PER_PTE && get_next_vma(walk, PMD_MASK, PAGE_SIZE, &start, &end))
+ 		goto restart;
+ 
++	/*
++	 * The donor batches generation counters after changing page flags.  On
++	 * this 4.19 tree a page can be isolated or recharged in that window, so
++	 * deletion observes the new generation before its credit exists and can
++	 * underflow both MGLRU and compatibility accounting.  The window grows
++	 * to thousands of pages during reclaim and is visible as a zero anon LRU.
++	 *
++	 * PTL -> LRU locking is already required by lru_gen_look_around().  Keep
++	 * the PTE table stable and commit this bounded table's promotions while
++	 * holding the LRU lock, so page flags and counters remain one transaction.
++	 */
++	if (!bitmap_empty(promote, PTRS_PER_PTE)) {
++		spin_lock_irq(&pgdat->lru_lock);
++		new_gen = lru_gen_from_seq(priv->lruvec->lrugen.max_seq);
++
++		for_each_set_bit(i, promote, PTRS_PER_PTE) {
++			struct page *page = compound_head(pte_page(pte[i]));
++
++			if (page_memcg_rcu(page) != memcg)
++				continue;
++
++			old_gen = page_update_gen(page, new_gen, &type);
++			if (old_gen >= 0 && old_gen != new_gen)
++				lru_gen_update_size(priv->lruvec, page, old_gen,
++						    new_gen, type, LRU_GEN_UPDATE_PTE);
++		}
++
++		spin_unlock_irq(&pgdat->lru_lock);
++	}
++
+ 	pte_unmap(pte);
+ 
+ 	arch_leave_lazy_mmu_mode();
+@@ -4221,6 +4412,8 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
+  * to the PTE table to the Bloom filter. This process is a feedback loop from
+  * the eviction to the aging.
+  */
++static atomic_long_t lru_gen_rmap_owner_mismatch = ATOMIC_LONG_INIT(0);
++
+ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
+ {
+ 	int i;
+@@ -4353,6 +4546,24 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
+ 
+ 	walk = current->reclaim_state ? current->reclaim_state->mm_walk : NULL;
+ 
++	/*
++	 * In 4.19 an uncharged swapcache page can be charged by a swap fault
++	 * after isolation. Its rmap now belongs to a different lruvec from
++	 * the eviction batch. Never flush that owner's promotions into the
++	 * original lruvec: use the existing unbatched path for this rmap.
++	 */
++	if (walk && walk->lruvec != lruvec) {
++		atomic_long_inc(&lru_gen_rmap_owner_mismatch);
++	}
++
++	/*
++	 * Do not defer rmap promotion accounting on this backport.  Apart from
++	 * the foreign-owner case above, deferred page flags can race isolation
++	 * before reset_batch_size() supplies their generation credit.  The
++	 * existing unbatched paths are bounded to this PTE neighbourhood.
++	 */
++	walk = NULL;
++
+ 	if (!walk && bitmap_weight(bitmap, MIN_LRU_BATCH) < PAGEVEC_SIZE) {
+ 		for_each_set_bit(i, bitmap, MIN_LRU_BATCH) {
+ 			page = compound_head(pte_page(pte[i]));
+@@ -4381,7 +4592,8 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
+ 			update_batch_size(walk, page, old_gen, new_gen, type);
+ 		else
+ 			/* page_update_gen() ran before lru_lock; keep its CAS type. */
+-			lru_gen_update_size(lruvec, page, old_gen, new_gen, type);
++			lru_gen_update_size(lruvec, page, old_gen, new_gen, type,
++					    LRU_GEN_UPDATE_RMAP);
+ 	}
+ 
+ 	if (!walk)
+@@ -4735,6 +4947,11 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc,
+ 	if (list_empty(&list))
+ 		return scanned;
+ 
++	/* Bind the rmap batch to the lruvec which will receive its deltas. */
++	walk = current->reclaim_state ? current->reclaim_state->mm_walk : NULL;
++	if (walk)
++		walk->lruvec = lruvec;
++
+ 	reclaimed = shrink_page_list(&list, pgdat, sc, 0, &stat, false);
+ 	__count_vm_events(MGLRU_RECLAIMED, reclaimed);
+ 
+@@ -5129,6 +5346,8 @@ static ssize_t show_lru_gen_accounting(struct kobject *kobj,
+ 	long generations[LRU_UNEVICTABLE] = {};
+ 	long compatibility[LRU_UNEVICTABLE] = {};
+ 	unsigned long negative_buckets = 0;
++	unsigned long negative_pages = 0;
++	long most_negative = 0;
+ 	int nid, gen, type, zone, lru;
+ 	ssize_t len = 0;
+ 
+@@ -5145,7 +5364,11 @@ static ssize_t show_lru_gen_accounting(struct kobject *kobj,
+ 
+ 				lru = type * LRU_FILE + lru_gen_is_active(lruvec, gen);
+ 				generations[lru] += size;
+-				negative_buckets += size < 0;
++				if (size < 0) {
++					negative_buckets++;
++					negative_pages += -size;
++					most_negative = min(most_negative, size);
++				}
+ 			}
+ 			spin_unlock_irq(&pgdat->lru_lock);
+ 		}
+@@ -5154,8 +5377,33 @@ static ssize_t show_lru_gen_accounting(struct kobject *kobj,
+ 	for (lru = 0; lru < LRU_UNEVICTABLE; lru++)
+ 		compatibility[lru] = atomic_long_read(&vm_node_stat[NR_LRU_BASE + lru]);
+ 	len += scnprintf(buf + len, PAGE_SIZE - len,
+-		"unit=pages snapshot=non-atomic negative_generation_buckets=%lu\n",
+-		negative_buckets);
++		"unit=pages snapshot=non-atomic negative_generation_buckets=%lu negative_generation_pages=%lu most_negative_generation=%ld rmap_owner_mismatch=%ld size_underflow=%ld size_underflow_pages=%ld batch_underflow=%ld batch_underflow_pages=%ld\n",
++		negative_buckets, negative_pages, most_negative,
++		atomic_long_read(&lru_gen_rmap_owner_mismatch),
++		atomic_long_read(&lru_gen_size_underflow),
++		atomic_long_read(&lru_gen_size_underflow_pages),
++		atomic_long_read(&lru_gen_batch_underflow),
++		atomic_long_read(&lru_gen_batch_underflow_pages));
++	len += scnprintf(buf + len, PAGE_SIZE - len,
++		"underflow_delete=%ld underflow_promote=%ld underflow_memcg_mismatch=%ld underflow_type_mismatch=%ld last_lruvec_memcg=%ld last_page_memcg=%ld last_old_gen=%ld last_new_gen=%ld last_type=%ld last_zone=%ld\n",
++		atomic_long_read(&lru_gen_underflow_delete),
++		atomic_long_read(&lru_gen_underflow_promote),
++		atomic_long_read(&lru_gen_underflow_memcg_mismatch),
++		atomic_long_read(&lru_gen_underflow_type_mismatch),
++		atomic_long_read(&lru_gen_underflow_last_lruvec_memcg),
++		atomic_long_read(&lru_gen_underflow_last_page_memcg),
++		atomic_long_read(&lru_gen_underflow_last_old_gen),
++		atomic_long_read(&lru_gen_underflow_last_new_gen),
++		atomic_long_read(&lru_gen_underflow_last_type),
++		atomic_long_read(&lru_gen_underflow_last_zone));
++	len += scnprintf(buf + len, PAGE_SIZE - len,
++		"underflow_reason_add=%ld underflow_reason_del=%ld underflow_reason_inc=%ld underflow_reason_pte=%ld underflow_reason_rmap=%ld first_underflow_reason=%ld\n",
++		atomic_long_read(&lru_gen_underflow_reason[LRU_GEN_UPDATE_ADD]),
++		atomic_long_read(&lru_gen_underflow_reason[LRU_GEN_UPDATE_DEL]),
++		atomic_long_read(&lru_gen_underflow_reason[LRU_GEN_UPDATE_INC]),
++		atomic_long_read(&lru_gen_underflow_reason[LRU_GEN_UPDATE_PTE]),
++		atomic_long_read(&lru_gen_underflow_reason[LRU_GEN_UPDATE_RMAP]),
++		atomic_long_read(&lru_gen_underflow_first_reason));
+ 	for (lru = 0; lru < LRU_UNEVICTABLE; lru++)
+ 		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 			"%s_%s generation=%ld compatibility_raw=%ld\n",
+@@ -5687,6 +5935,8 @@ static int __init init_lru_gen(void)
+ 
+ 	debugfs_create_file("lru_gen", 0644, NULL, NULL, &lru_gen_rw_fops);
+ 	debugfs_create_file("lru_gen_full", 0444, NULL, NULL, &lru_gen_ro_fops);
++	if (!proc_create("lru_gen_history", 0400, NULL, &lru_history_fops))
++		pr_err("lru_gen: failed to create frozen history export\n");
+ 
+ 	return 0;
+ };
+-- 
+2.56.0
+

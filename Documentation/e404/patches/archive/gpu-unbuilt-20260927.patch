@@ -1,0 +1,136 @@
+diff --git a/drivers/gpu/msm/adreno_a6xx.c b/drivers/gpu/msm/adreno_a6xx.c
+index fb7f4c2ba804..9d370324bb63 100644
+--- a/drivers/gpu/msm/adreno_a6xx.c
++++ b/drivers/gpu/msm/adreno_a6xx.c
+@@ -2241,60 +2241,69 @@ static int a6xx_perfcounter_update(struct adreno_device *adreno_dev,
+ {
+ 	void *ptr = adreno_dev->pwrup_reglist.hostptr;
+ 	struct cpu_gpu_lock *lock = ptr;
+-	u32 *data = ptr + sizeof(*lock);
+-	int i, offset = 0;
+-	bool select_reg_present = false;
++	u32 *data;
++	size_t capacity;
++	u32 length, offset;
++	int ret = 0;
+ 
+-	if (select_reg_present) {
+-		data[offset + 1] = reg->countable;
+-		goto update;
+-	}
++	if (!ptr || adreno_dev->pwrup_reglist.size < sizeof(*lock))
++		return -EINVAL;
+ 
++	data = ptr + sizeof(*lock);
++	capacity = (adreno_dev->pwrup_reglist.size - sizeof(*lock)) /
++		sizeof(*data);
+ 
+ 	if (cpu_gpu_lock(lock)) {
+ 		cpu_gpu_unlock(lock);
+ 		return -EBUSY;
+ 	}
+ 
+-	/*
+-	 * If the perfcounter select register is already present in reglist
+-	 * update it, otherwise append the <select register, value> pair to
+-	 * the end of the list.
+-	 */
+-	for (i = 0; i < lock->list_length >> 1; i++) {
++	/* Validate the data-relative word count before scanning any pairs. */
++	length = lock->list_length;
++	if ((length & 1) || length > capacity) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++
++	/* A612 must retain its final control pair when adding a counter. */
++	if (adreno_is_a612(adreno_dev) &&
++		(length < 2 || data[length - 2] != A6XX_RBBM_PERFCTR_CNTL)) {
++		ret = -EINVAL;
++		goto unlock;
++	}
++
++	/* Updating an existing pair is valid even when the list is full. */
++	for (offset = 0; offset < length; offset += 2) {
+ 		if (data[offset] == reg->select) {
+ 			data[offset + 1] = reg->countable;
+ 			goto update;
+ 		}
++	}
+ 
+-		offset += 2;
++	/* Both layouts grow by two words; exclude the shared lock header. */
++	if (capacity - length < 2 || length > U16_MAX - 2) {
++		ret = -ENOSPC;
++		goto unlock;
+ 	}
+ 
+-	/*
+-	 * For a612 targets A6XX_RBBM_PERFCTR_CNTL needs to be the last entry,
+-	 * so overwrite the existing A6XX_RBBM_PERFCNTL_CTRL and add it back to
+-	 * the end. All other targets just append the new counter to the end.
+-	 */
+ 	if (adreno_is_a612(adreno_dev)) {
+-		data[offset - 2] = reg->select;
+-		data[offset - 1] = reg->countable;
+-
+-		data[offset] = A6XX_RBBM_PERFCTR_CNTL,
+-		data[offset + 1] = 1;
++		data[length - 2] = reg->select;
++		data[length - 1] = reg->countable;
++		data[length] = A6XX_RBBM_PERFCTR_CNTL;
++		data[length + 1] = 1;
+ 	} else {
+-		data[offset] = reg->select;
+-		data[offset + 1] = reg->countable;
++		data[length] = reg->select;
++		data[length + 1] = reg->countable;
+ 	}
+-
+-	lock->list_length += 2;
++	lock->list_length = length + 2;
+ 
+ update:
+ 	if (update_reg)
+ 		kgsl_regwrite(KGSL_DEVICE(adreno_dev), reg->select,
+ 			reg->countable);
+-
++unlock:
+ 	cpu_gpu_unlock(lock);
+-	return 0;
++	return ret;
+ }
+ 
+ static void a6xx_clk_set_options(struct adreno_device *adreno_dev,
+diff --git a/drivers/gpu/msm/adreno_ioctl.c b/drivers/gpu/msm/adreno_ioctl.c
+index ee0dc9326490..71c8c735905b 100644
+--- a/drivers/gpu/msm/adreno_ioctl.c
++++ b/drivers/gpu/msm/adreno_ioctl.c
+@@ -186,7 +186,7 @@ long adreno_ioctl_helper(struct kgsl_device_private *dev_priv,
+ 	if (i == len)
+ 		return -ENOIOCTLCMD;
+ 
+-	if (_IOC_SIZE(cmds[i].cmd > sizeof(data))) {
++	if (_IOC_SIZE(cmds[i].cmd) > sizeof(data)) {
+ 		dev_err_ratelimited(dev_priv->device->dev,
+ 			"data too big for ioctl 0x%08x: %d/%zu\n",
+ 			cmd, _IOC_SIZE(cmds[i].cmd), sizeof(data));
+diff --git a/drivers/gpu/msm/kgsl.c b/drivers/gpu/msm/kgsl.c
+index 2ea2ce92fefc..175445e9521e 100644
+--- a/drivers/gpu/msm/kgsl.c
++++ b/drivers/gpu/msm/kgsl.c
+@@ -91,7 +91,13 @@ static const struct vm_operations_struct kgsl_gpumem_vm_ops;
+  * recently freed and print out a message to that effect
+  */
+ 
+-#define MEMFREE_ENTRIES 512
++/*
++ * kgsl_memfree_purge() scans this whole array under memfree_lock on every
++ * allocation, so its size is paid on the hot path while only the pagefault
++ * diagnostic reader ever benefits from the depth. Keep enough history to be
++ * useful without holding a global spinlock for 512 iterations per allocation.
++ */
++#define MEMFREE_ENTRIES 64
+ 
+ static DEFINE_SPINLOCK(memfree_lock);
+ 
