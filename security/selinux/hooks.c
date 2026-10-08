@@ -6448,6 +6448,13 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
 			str[size-1] = 0;
 			size--;
 		}
+#if IS_BUILTIN(CONFIG_KSU)
+		if (!strcmp(name, "current") && security_compat_active()) {
+			error = security_compat_context(value, size, NULL, NULL);
+			if (error)
+				return error;
+		}
+#endif
 		error = security_context_to_sid(&selinux_state, value, size,
 						&sid, GFP_KERNEL);
 		if (error == -EINVAL && !strcmp(name, "fscreate")) {

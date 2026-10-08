@@ -2226,6 +2226,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len)
 		security_load_policycaps(state);
 		selinux_mark_initialized(state);
 		seqno = ++state->ss->latest_granting;
+#if IS_BUILTIN(CONFIG_KSU)
+		security_compat_capture_stock(data, len);
+#endif
 		selinux_complete_init();
 		avc_ss_reset(state->avc, seqno);
 		selnl_notify_policyload(seqno);
@@ -2291,6 +2294,9 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len)
 	/* Save the old policydb and SID table to free later. */
 	memcpy(oldpolicydb, policydb, sizeof(*policydb));
 
+#if IS_BUILTIN(CONFIG_KSU)
+	security_compat_invalidate();
+#endif
 	/* Install the new policydb and SID table. */
 	write_lock_irq(&state->ss->policy_rwlock);
 	memcpy(policydb, newpolicydb, sizeof(*policydb));
@@ -2956,6 +2962,10 @@ int security_set_bools(struct selinux_state *state, int len, int *values)
 	if (len != lenp)
 		goto out;
 
+#if IS_BUILTIN(CONFIG_KSU)
+	/* Also invalidate if a later conditional evaluation fails partially. */
+	security_compat_invalidate();
+#endif
 	for (i = 0; i < len; i++) {
 		if (!!values[i] != policydb->bool_val_to_struct[i]->state) {
 			audit_log(audit_context(), GFP_ATOMIC,
@@ -3808,3 +3818,5 @@ int security_read_policy(struct selinux_state *state,
 	return 0;
 
 }
+
+#include "compat_query.c"

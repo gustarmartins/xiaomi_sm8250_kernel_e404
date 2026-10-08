@@ -280,6 +280,17 @@ void security_compute_xperms_decision(struct selinux_state *state,
 				      u8 driver,
 				      struct extended_perms_decision *xpermd);
 
+#if IS_BUILTIN(CONFIG_KSU)
+void security_compat_capture_stock(void *data, size_t len);
+void security_compat_invalidate(void);
+bool security_compat_get_enabled(void);
+int security_compat_set_enabled(bool enabled);
+bool security_compat_active(void);
+int security_compat_context(const char *text, u32 len, char **canon, u32 *canon_len);
+int security_compat_access(const char *source, const char *target, u16 tclass,
+                          struct av_decision *avd);
+#endif
+
 void security_compute_av_user(struct selinux_state *state,
 			      u32 ssid, u32 tsid,
 			      u16 tclass, struct av_decision *avd);

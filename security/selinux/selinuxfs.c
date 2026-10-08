@@ -614,6 +614,15 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
 	if (length)
 		goto out;
 
+#if IS_BUILTIN(CONFIG_KSU)
+	if (security_compat_active()) {
+		length = security_compat_context(buf, size, &canon, &len);
+		if (length)
+			goto out;
+		goto canonical;
+	}
+#endif
+
 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
 	if (length)
 		goto out;
@@ -622,6 +631,9 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
 	if (length)
 		goto out;
 
+#if IS_BUILTIN(CONFIG_KSU)
+canonical:
+#endif
 	length = -ERANGE;
 	if (len > SIMPLE_TRANSACTION_LIMIT) {
 		pr_err("SELinux: %s:  context size (%u) exceeds "
@@ -850,6 +862,15 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
 		goto out;
 
+#if IS_BUILTIN(CONFIG_KSU)
+	if (security_compat_active()) {
+		length = security_compat_access(scon, tcon, tclass, &avd);
+		if (length)
+			goto out;
+		goto decision;
+	}
+#endif
+
 	length = security_context_str_to_sid(state, scon, &ssid, GFP_KERNEL);
 	if (length)
 		goto out;
@@ -860,6 +881,9 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
 
 	security_compute_av_user(state, ssid, tsid, tclass, &avd);
 
+#if IS_BUILTIN(CONFIG_KSU)
+decision:
+#endif
 	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT,
 			  "%x %x %x %x %u %x",
 			  avd.allowed, 0xffffffff,
