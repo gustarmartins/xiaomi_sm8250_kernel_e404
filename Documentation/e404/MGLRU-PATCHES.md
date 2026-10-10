@@ -1,6 +1,7 @@
-# MGLRU patches for E404 maintainers
+# MGLRU on munch
 
-These repairs target the MGLRU backport in this Linux 4.19 / SM8250 tree. They are offered for review and adaptation to E404. The fork also carries scheduler, charging, ZRAM and KernelSU work; importing the entire fork is not required to review the memory-management fixes.
+Repair documentation for MGLRU backport in this tree (written with the assistance of GPT Astra). Can be used to adapt MGLRU properly for munch devices and other related-kernel trees...
+The fork also carries scheduler, charging, ZRAM and KernelSU work, most targetting my "CryoManager" project and private preferences; therefore MGLRU and related memory-management additions were cherry-picked in this document.
 
 ## Where to start
 
@@ -9,7 +10,7 @@ The final accounting fixes are in [5078e7f1ed46](https://github.com/gustarmartin
 - [MGLRU accounting and bounded diagnostic history](patches/k108-mglru-accounting.patch): `mm/vmscan.c`, `include/linux/mm_inline.h`, `mm/mglru_history.h`.
 - [UFFD charge before LRU insertion and PTE publication](patches/k106-uffd-charge-order.patch): `mm/userfaultfd.c`, `mm/shmem.c`, `include/linux/userfaultfd_k.h`.
 
-Both are extracted relative to `9f2791203eeb`, which already includes the preceding repair series. They are not advertised as drop-in patches for arbitrary upstream E404 revisions. The accounting patch still groups several historical repairs and diagnostics; split it further for a formal upstream submission.
+Both are extracted relative to `9f2791203eeb`, which already includes the preceding repair series. The accounting patch still groups several historical repairs and diagnostics; split it further for a formal upstream submission.
 
 ### The userfaultfd bug
 
